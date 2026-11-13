@@ -1,0 +1,10 @@
+# Dependencies are never vendored: the plugin imports only Node.js built-ins.
+node_modules/
+
+# Research notes, browser-automation scripts and captured artifacts are local
+# working material, not part of the plugin.
+research/
+
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Router fallback",
+    "description": "Continues on the next connected router when the active router's quota is exhausted. Configure the chain from Settings; routers are loaded from this Harness profile."
+  }
+}

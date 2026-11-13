@@ -1,0 +1,59 @@
+{
+  "name": "dsh-fallback",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Transparent LLM router fallback for DeepSeek Harness: when the active router's quota is exhausted, the same request continues on the next connected router. Works in dsh-desktop.",
+  "license": "MIT",
+  "author": "Kachchi3739",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kachchi3739/dsh-fallback.git"
+  },
+  "homepage": "https://github.com/Kachchi3739/dsh-fallback#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-bundle",
+    "cordis-plugin",
+    "router",
+    "fallback",
+    "llm",
+    "quota"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.ko.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none \"test/*.test.mjs\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

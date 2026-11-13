@@ -1,0 +1,151 @@
+# dsh-fallback
+
+**Router fallback for DeepSeek Harness (dsh / dsh-desktop).**
+
+When the router (LLM provider route) the current request is using reports an
+exhausted quota or limit, the *same request* continues on the next router in
+your fallback chain — with no re-typed API keys, no second credential store,
+and no app restart. The chain is built from the routers already connected to
+your Harness profile.
+
+![Router fallback panel in DeepSeek Harness](docs/router-fallback-panel.png)
+
+## Features
+
+- **Transparent fallback on quota/limit failures** — a request that fails with
+  `QUOTA`, `ACCOUNT_QUOTA`, or `RATE_LIMIT` is re-dispatched to the next ready
+  router in the chain. The terminal failure only reaches the conversation when
+  no router can answer.
+- **Loads the routers already connected to dsh** — the panel lists every
+  provider route registered in the profile (`opencode-go`, `opencode`,
+  `deepseek-account`, `deepseek-official`, custom gateways, …) together with
+  each route's own model catalog. Adding a router to the chain needs no key,
+  endpoint, or model list.
+- **Per-request attempt chain** — requests start at the router you selected in
+  the composer, then continue down the chain. Order is editable from the panel.
+- **Cooldown after exhaustion** — a router that reported an exhausted quota is
+  skipped for the rest of the configured window instead of being retried on
+  every model step. `RATE_LIMIT` uses a short window, quota/balance codes use a
+  longer one; a provider-supplied `retry-after` always wins.
+- **Never corrupts visible output** — chunks are buffered until the first real
+  content chunk of an attempt; a rejected attempt that produced only framing
+  chunks leaves no trace. Fallback never happens after visible output, because
+  the durable message can no longer be replayed safely.
+- **Cross-provider history safety** — when an attempt moves to a different
+  provider, provider-native reasoning blocks are dropped from history and
+  reasoning is pinned off when the target advertises an `off` level, so a
+  fallback is not rejected for missing another provider's thinking blocks.
+- **Self-test** — sends one tiny request through a simulated exhausted router
+  and proves, end to end, which real router in the chain answers.
+- **Status and history** — router health, cooldown countdowns, the last
+  fallback events, and a per-router request/success/failure counter.
+- **dsh-desktop support** — the panel is a normal Web UI plugin (left-sidebar
+  entry + full page + same-origin JSON API), so it works in the desktop app and
+  in the browser frontend alike.
+
+## Install
+
+A bundle install links this directory into the running profile; no build step,
+no dependencies, no `@deepseek-ai` package imports.
+
+```text
+plugin_manager install_bundle  <absolute path to this directory>
+```
+
+or from a shell with the plugin manager available:
+
+```text
+dsh plugin install /path/to/dsh-fallback
+```
+
+After the first install, **refresh the app window** (or restart dsh-desktop) so
+the Web shell loads the new client module. Afterwards an entry named
+**Router fallback / 라우터 폴백** appears in the left sidebar panel row.
+
+## Use
+
+1. Open **Router fallback** in the sidebar.
+2. Under **Connected routers**, add each router you want in the chain. The list
+   is read live from the Harness LLM service; nothing is re-entered.
+3. Pick the model for each row. `Use the selected model` keeps the model id you
+   selected in the composer (useful when the same model is served by several
+   routers); otherwise choose an explicit model.
+4. Save. The chain applies to the next model call — the current conversation
+   keeps running.
+5. Press **Test fallback** to force a simulated quota failure and confirm the
+   first real router answers.
+
+Requests start at the router selected in the composer and walk down the chain.
+If the selected router is not in the chain, it is tried first and the chain is
+used as its fallback list. Routes in cooldown are skipped.
+
+## Configuration
+
+The bundle row's `config` is the deployment default (empty chain, quota codes,
+3 attempts). Everything edited from the panel is stored as overrides in the
+profile's state file so the user's `cordis.patch.yml` is never rewritten:
+
+```text
+<DSH_HOME>/fallback/state.json          # e.g. C:\Users\<you>\.dsh\fallback\state.json
+```
+
+The file contains provider/model ids, failure codes and timings — **no
+credentials**. Deleting it resets the chain and all counters; a malformed or
+missing file simply falls back to the bundle defaults.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Enable router fallback | on | Off leaves every request on the selected router. |
+| Fallback chain | empty | Ordered routers; first ready one answers. |
+| Trigger codes | `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT` | Failures that move the request to the next router. |
+| Max attempts per request | 3 | Hard cap including the selected router. |
+| Quota/balance skip | 30 min | Cooldown after `QUOTA`/`ACCOUNT_QUOTA`, unless the provider reports `retry-after`. |
+| Rate-limit skip | 60 s | Cooldown after `RATE_LIMIT`. |
+
+## How it works
+
+The Host half attaches one `llm/stream` waterfall listener (a documented,
+interceptable seam of `@deepseek-ai/dsh-llm`; the plugin imports no Harness
+package). For each model call it plans the attempt list, dispatches the first
+attempt through the normal adapter path, and only re-dispatches
+`{...request, provider, model}` when the attempt failed with a trigger code
+*before* any content became visible. Everything else — session log, streaming,
+tool calls, turn errors — is the shipped behavior.
+
+Known consequences of doing this at the LLM seam:
+
+- The durable assistant message keeps the **originally selected** provider/model
+  as its source (the Harness records the requested route, not the answering
+  one). The panel's event log records the actual answering router.
+- Quota failures are not retried on the same route first: the plugin switches
+  immediately. `RATE_LIMIT` is also in the default Harness retry set, so a
+  fallback-capable chain answers faster than the retry backoff.
+- A fallback can still fail (invalid model on the target, context window,
+  credentials). The final failure is the provider's own, with a
+  `[dsh-fallback: fallback chain exhausted]` suffix on the message.
+- Only quota/limit-style codes are handled. Context-overflow, invalid-request
+  and auth failures are surfaced, not silently moved, because another router
+  would fail the same way.
+- `deepseek-official` may advertise no model catalog in some profiles; it can
+  still be added with `Use the selected model`.
+
+## Development
+
+Pure Node.js ESM; no bundler and no dependencies.
+
+```bash
+node --test --test-isolation=none "test/*.test.mjs"
+```
+
+- `lib/engine.mjs` — attempt planning, failure classification, cooldowns,
+  reasoning-history sanitization, the buffering stream runner (pure, unit
+  tested).
+- `lib/providers.mjs` — live provider/model discovery over the `llm` service.
+- `lib/probe.mjs` — the quota probe adapter and self-test request.
+- `lib/state.mjs` — durable overrides, health and event log.
+- `index.js` — Cordis wiring, interception, self-test, HTTP API.
+- `client.js` — the Web UI page (plain React from the host module table).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

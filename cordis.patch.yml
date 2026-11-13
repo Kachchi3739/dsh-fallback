@@ -1,0 +1,18 @@
+# dsh-fallback bundle: one Host plugin that owns the LLM router-fallback
+# interceptor and the settings-page HTTP API, plus one Client module that
+# renders the "Router fallback" page under Settings.
+#
+# The chain and its runtime settings are managed from that page and stored in
+# this profile's `.dsh-fallback/state.json`; the values below are only the
+# deployment defaults a fresh profile starts from.
+- insert:
+    - id: dsh-fallback
+      name: dsh-fallback
+      config:
+        enabled: true
+        chain: []
+        fallbackCodes:
+          - QUOTA
+          - ACCOUNT_QUOTA
+          - RATE_LIMIT
+        maxAttempts: 3
