@@ -82,12 +82,20 @@ function failingAdapter(provider, code = 'QUOTA') {
 }
 
 /** Minimal stand-in for Cordis `ctx` plus the LLM service. */
+/** Latest request headers the fake pi-ai adapter prepared (single-threaded tests). */
+let testHeaders = null
+
+/** The `Authorization` header the current attempt carried, when any. */
+const currentAuthorization = () => testHeaders?.get('authorization') ?? null
+
 function createFakeHarness() {
   const adapters = new Map()
   const streamListeners = []
+  const headerListeners = []
   const routes = []
   const effects = []
   const dispatches = []
+  const credentials = new Map()
   const llm = {
     listProviders: () => [...adapters.values()].map((registration) => ({ ...registration.provider })),
     listConfigurableProviders: () => [],
@@ -118,13 +126,37 @@ function createFakeHarness() {
       return runWaterfall(options)
     },
   }
+  /** Run the plugin's pi-ai header waterfall exactly like the real adapter. */
+  function prepareHeaders(options) {
+    const request = Object.freeze({
+      provider: options.provider,
+      model: options.model,
+      baseURL: 'test://gateway',
+      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
+    })
+    const headers = new Headers()
+    const run = (index) => {
+      const listener = headerListeners[index]
+      if (listener === undefined) return headers
+      let called = false
+      const next = () => {
+        if (called) throw new Error('next() called multiple times')
+        called = true
+        return run(index + 1)
+      }
+      return listener(request, headers, next)
+    }
+    return run(0)
+  }
   async function* adapterStream(options) {
     const registration = adapters.get(options.provider)
     if (registration === undefined) {
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: 'no adapter' } } }
       return
     }
-    dispatches.push({ provider: options.provider, model: options.model })
+    testHeaders = prepareHeaders(options)
+    dispatches.push({ provider: options.provider, model: options.model, authorization: testHeaders.get('authorization') })
     let iterator
     try {
       const prepared = await registration.adapter.prepareCall(options.provider, options.model)
@@ -179,7 +211,28 @@ function createFakeHarness() {
     logger: { info() {}, warn() {} },
     on(event, listener) {
       if (event === 'llm/stream') streamListeners.push(listener)
+      if (event === 'llm-pi-ai/request-headers') headerListeners.push(listener)
       return () => {}
+    },
+    get(name) {
+      if (name === 'credentials') {
+        return {
+          async resolve(ref) {
+            const value = credentials.get(ref)
+            return value === undefined ? undefined : { value, source: 'test' }
+          },
+          async describe(ref) {
+            return { configured: credentials.has(ref), writable: true }
+          },
+          async set(ref, value) {
+            credentials.set(ref, value)
+          },
+          async unset(ref) {
+            credentials.delete(ref)
+          },
+        }
+      }
+      return undefined
     },
     effect(callback) {
       const dispose = callback()
@@ -187,7 +240,7 @@ function createFakeHarness() {
       return dispose
     },
   }
-  return { ctx, llm, routes, effects, dispatches, adapters }
+  return { ctx, llm, routes, effects, dispatches, adapters, credentials }
 }
 
 /** Build a request for one of the plugin's routes. */
@@ -200,10 +253,11 @@ async function jsonOf(promise) {
 }
 
 /** Spin up the plugin against a fake harness in a throwaway profile dir. */
-function setup({ adapters = {}, rowConfig = {} } = {}) {
-  const profileDir = mkdtempSync(path.join(tmpdir(), 'dsh-fallback-test-'))
+function setup({ adapters = {}, rowConfig = {}, profileDir = null } = {}) {
+  const ownedProfileDir = profileDir === null
+  const dir = profileDir ?? mkdtempSync(path.join(tmpdir(), 'dsh-fallback-test-'))
   const previousProfile = process.env.DSH_PROFILE_DIR
-  process.env.DSH_PROFILE_DIR = profileDir
+  process.env.DSH_PROFILE_DIR = dir
   const harness = createFakeHarness()
   for (const [provider, adapter] of Object.entries(adapters)) {
     harness.llm.registerAdapter([provider], adapter)
@@ -250,9 +304,9 @@ function setup({ adapters = {}, rowConfig = {} } = {}) {
     }
     if (previousProfile === undefined) delete process.env.DSH_PROFILE_DIR
     else process.env.DSH_PROFILE_DIR = previousProfile
-    rmSync(profileDir, { recursive: true, force: true })
+    if (ownedProfileDir) rmSync(dir, { recursive: true, force: true })
   }
-  return { ...harness, route, call, finish, profileDir }
+  return { ...harness, route, call, finish, profileDir: dir }
 }
 
 test('bundle identity is coherent', () => {
@@ -544,5 +598,244 @@ test('an unlisted selected provider is tried first, then the chain', async () =>
     assert.deepEqual(harness.dispatches.map((entry) => entry.provider), ['other'])
   } finally {
     harness.finish()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Pooled accounts on one provider route
+// ---------------------------------------------------------------------------
+
+/** An adapter that rejects one specific rotated key and answers otherwise. */
+function keyAwareAdapter(provider, options = {}) {
+  const failKey = options.failKey ?? null
+  const code = options.code ?? 'QUOTA'
+  const reply = options.reply ?? 'hello from an account'
+  const adapter = {
+    providerInfo: (route) => ({ id: route, name: `${provider} router` }),
+    providerRetryPolicy: () => undefined,
+    imageRequestPricing: () => undefined,
+    imageRequestTarget: (_p, _m, image) => ({ width: image.width, height: image.height, maxBytes: image.bytes }),
+    listModels: async (route) => [{ provider: route, id: 'flash', name: 'flash' }],
+    resolveModel: async (route, model) => ({ provider: route, id: model, name: model }),
+    prepareCall: async (route, model) => ({
+      model: { provider: route, id: model, name: model },
+      stream: () => adapter.stream(),
+    }),
+    async *stream() {
+      const authorization = currentAuthorization()
+      if (failKey !== null && authorization === `Bearer ${failKey}`) {
+        const error = new Error(`${code} for the rotated account key`)
+        error.code = code
+        error.failure = { code, message: `${code} for the rotated account key`, status: 402 }
+        throw error
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: reply }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  return adapter
+}
+
+const opencodeHarness = (adapters = {}) =>
+  setup({
+    adapters: { 'opencode-go': keyAwareAdapter('opencode-go'), backup: textAdapter('backup'), ...adapters },
+    rowConfig: {
+      chain: [
+        { provider: 'opencode-go', model: 'flash' },
+        { provider: 'backup', model: 'backup-model' },
+      ],
+    },
+  })
+
+const createAccount = (harness, body) =>
+  harness.call('/accounts/create', {
+    method: 'POST',
+    body: JSON.stringify({ provider: 'opencode-go', label: '계정 2', key: 'oc_sk_test_account_2', ...body }),
+  })
+
+test('an account key is stored in the credentials service, never in the state file', async () => {
+  const harness = opencodeHarness()
+  try {
+    const created = await createAccount(harness, {})
+    assert.equal(created.status, 200)
+    assert.equal(created.body.ok, true)
+    assert.equal(harness.credentials.size, 1)
+    const [ref, value] = [...harness.credentials.entries()][0]
+    assert.match(ref, /^DSH_FALLBACK_OPENCODE_GO_[A-F0-9]+$/)
+    assert.equal(value, 'oc_sk_test_account_2')
+    const accounts = created.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    assert.equal(accounts.accounts.length, 2)
+    assert.equal(accounts.accounts[0].kind, 'default')
+    assert.equal(accounts.accounts[1].kind, 'added')
+    assert.equal(accounts.accounts[1].label, '계정 2')
+    const stateFile = path.join(harness.profileDir, '.dsh-fallback', 'state.json')
+    const text = readFileSync(stateFile, 'utf8')
+    assert.equal(text.includes('oc_sk_test_account_2'), false)
+    assert.match(text, /DSH_FALLBACK_OPENCODE_GO_/)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('with pooled accounts configured the default account still uses the route key', async () => {
+  const harness = opencodeHarness()
+  try {
+    await createAccount(harness, {})
+    const chunks = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    assert.equal(finishOf(chunks)?.reason.kind, 'stop')
+    assert.equal(harness.dispatches.length, 1)
+    assert.equal(harness.dispatches[0].authorization, null)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('the added account key is rotated into the request headers', async () => {
+  const harness = opencodeHarness()
+  try {
+    await createAccount(harness, {})
+    await harness.call('/accounts/skip', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: 'default', minutes: 30 }),
+    })
+    const chunks = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    assert.equal(textOf(chunks), 'hello from an account')
+    assert.equal(finishOf(chunks)?.reason.kind, 'stop')
+    assert.equal(harness.dispatches.length, 1)
+    assert.equal(harness.dispatches[0].authorization, 'Bearer oc_sk_test_account_2')
+  } finally {
+    harness.finish()
+  }
+})
+
+test('an exhausted account falls through to the next chain router', async () => {
+  const harness = opencodeHarness({
+    'opencode-go': keyAwareAdapter('opencode-go', { failKey: 'oc_sk_test_account_2' }),
+  })
+  try {
+    await createAccount(harness, { label: '계정 2' })
+    await harness.call('/accounts/skip', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: 'default', minutes: 30 }),
+    })
+    const chunks = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    assert.equal(finishOf(chunks)?.reason.kind, 'stop')
+    assert.deepEqual(harness.dispatches.map((entry) => entry.provider), ['opencode-go', 'backup'])
+    assert.equal(harness.dispatches[0].authorization, 'Bearer oc_sk_test_account_2')
+    const state = await harness.call('/state')
+    const event = state.body.events.find((entry) => entry.kind === 'fallback' && entry.from?.account !== undefined)
+    assert.ok(event !== undefined)
+    assert.equal(event.from.account.label, '계정 2')
+    assert.equal(event.to.provider, 'backup')
+    const accounts = state.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    const added = accounts.accounts.find((entry) => entry.kind === 'added')
+    assert.equal(added.degraded.code, 'QUOTA')
+  } finally {
+    harness.finish()
+  }
+})
+
+test('an account connection test uses that account key', async () => {
+  const harness = opencodeHarness()
+  try {
+    const created = await createAccount(harness, {})
+    const id = created.body.accountId
+    const tested = await harness.call('/accounts/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id }),
+    })
+    assert.equal(tested.body.result.ok, true)
+    assert.equal(tested.body.result.account.kind, 'added')
+    assert.equal(tested.body.result.model, 'flash')
+    assert.equal(harness.dispatches.at(-1).authorization, 'Bearer oc_sk_test_account_2')
+  } finally {
+    harness.finish()
+  }
+})
+
+test('removing an account deletes its credential and leaves the default account', async () => {
+  const harness = opencodeHarness()
+  try {
+    const created = await createAccount(harness, {})
+    const removed = await harness.call('/accounts/remove', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: created.body.accountId }),
+    })
+    assert.equal(removed.body.ok, true)
+    assert.equal(harness.credentials.size, 0)
+    const accounts = removed.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    assert.equal(accounts.accounts.length, 1)
+    assert.equal(accounts.accounts[0].kind, 'default')
+  } finally {
+    harness.finish()
+  }
+})
+
+test('account skip and resume drive the account health window', async () => {
+  const harness = opencodeHarness()
+  try {
+    await createAccount(harness, {})
+    const skipped = await harness.call('/accounts/skip', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: 'default', minutes: 5 }),
+    })
+    let accounts = skipped.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    assert.equal(accounts.accounts[0].degraded.code, 'MANUAL_SKIP')
+    assert.ok(accounts.accounts[0].degraded.remainingMs > 0)
+    const resumed = await harness.call('/accounts/resume', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: 'default' }),
+    })
+    accounts = resumed.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    assert.equal(accounts.accounts[0].degraded, null)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('account input validation rejects bad keys and unknown providers', async () => {
+  const harness = opencodeHarness()
+  try {
+    const missing = await createAccount(harness, { key: '' })
+    assert.equal(missing.status, 400)
+    const bad = await createAccount(harness, { key: 'short' })
+    assert.equal(bad.status, 400)
+    const unsupported = await harness.call('/accounts/create', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'backup', key: 'oc_sk_test_account_2' }),
+    })
+    assert.equal(unsupported.status, 400)
+    const unknownProvider = await harness.call('/accounts/create', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode', key: 'oc_sk_test_account_2' }),
+    })
+    assert.equal(unknownProvider.status, 409)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('accounts are loaded back from the state file after a plugin reload', async () => {
+  const profileDir = mkdtempSync(path.join(tmpdir(), 'dsh-fallback-reload-'))
+  const adapters = { 'opencode-go': keyAwareAdapter('opencode-go'), backup: textAdapter('backup') }
+  const rowConfig = { chain: [{ provider: 'opencode-go', model: 'flash' }, { provider: 'backup', model: 'backup-model' }] }
+  const first = setup({ adapters, rowConfig, profileDir })
+  let second = null
+  try {
+    await createAccount(first, {})
+    const stateFile = path.join(profileDir, '.dsh-fallback', 'state.json')
+    const persisted = JSON.parse(readFileSync(stateFile, 'utf8'))
+    assert.equal(persisted.accounts['opencode-go'].length, 1)
+    first.finish()
+    second = setup({ adapters, rowConfig, profileDir })
+    const state = await second.call('/accounts')
+    const accounts = state.body.accounts.providers.find((entry) => entry.provider === 'opencode-go')
+    assert.equal(accounts.accounts.length, 2)
+  } finally {
+    if (second !== null) second.finish()
+    else first.finish()
+    rmSync(profileDir, { recursive: true, force: true })
   }
 })

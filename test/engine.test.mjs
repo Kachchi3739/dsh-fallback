@@ -190,6 +190,104 @@ test('planAttempts caps attempts and drops empty model ids only at the tail', ()
   assert.equal(attempts.length, 2)
 })
 
+test('planAttempts expands pooled accounts ahead of chain fallbacks', () => {
+  const chain = normalizeChain([
+    { provider: 'opencode-go', model: 'm' },
+    { provider: 'backup', model: 'bm' },
+  ])
+  const accounts = [
+    { id: 'default', label: 'default', kind: 'default', healthKey: 'account:opencode-go:default' },
+    { id: 'a2', label: 'account 2', kind: 'added', healthKey: 'account:opencode-go:a2' },
+  ]
+  const attempts = planAttempts({
+    provider: 'opencode-go',
+    model: 'm',
+    chain,
+    accounts,
+    health: createHealthStore({ now: () => 0 }),
+    maxAttempts: 8,
+  })
+  assert.deepEqual(
+    attempts.map((attempt) => `${attempt.provider}:${attempt.accountId ?? '-'}:${attempt.origin}`),
+    ['opencode-go:default:account', 'opencode-go:a2:account', 'backup:-:chain'],
+  )
+})
+
+test('planAttempts skips exhausted accounts and keeps the chain', () => {
+  const chain = normalizeChain([{ provider: 'backup', model: 'bm' }])
+  const accounts = [
+    { id: 'default', label: 'default', kind: 'default', healthKey: 'account:opencode-go:default' },
+    { id: 'a2', label: 'account 2', kind: 'added', healthKey: 'account:opencode-go:a2' },
+  ]
+  const health = createHealthStore({ now: () => 1000 })
+  health.markFailure('account:opencode-go:default', { code: 'QUOTA', message: 'q' }, 60_000)
+  const attempts = planAttempts({
+    provider: 'opencode-go',
+    model: 'm',
+    chain,
+    accounts,
+    health,
+    maxAttempts: 8,
+    now: 1000,
+  })
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.accountId ?? attempt.provider),
+    ['a2', 'backup'],
+  )
+})
+
+test('planAttempts falls back to the chain when every account is exhausted, and to the first account when nothing is healthy', () => {
+  const accounts = [
+    { id: 'default', label: 'default', kind: 'default', healthKey: 'account:opencode-go:default' },
+    { id: 'a2', label: 'account 2', kind: 'added', healthKey: 'account:opencode-go:a2' },
+  ]
+  const health = createHealthStore({ now: () => 1000 })
+  health.markFailure('account:opencode-go:default', { code: 'QUOTA', message: 'q' }, 60_000)
+  health.markFailure('account:opencode-go:a2', { code: 'QUOTA', message: 'q' }, 60_000)
+  const withChain = planAttempts({
+    provider: 'opencode-go',
+    model: 'm',
+    chain: normalizeChain([{ provider: 'backup', model: 'bm' }]),
+    accounts,
+    health,
+    maxAttempts: 8,
+    now: 1000,
+  })
+  assert.deepEqual(
+    withChain.map((attempt) => attempt.accountId ?? attempt.provider),
+    ['backup'],
+  )
+  const withoutChain = planAttempts({
+    provider: 'opencode-go',
+    model: 'm',
+    chain: [],
+    accounts,
+    health,
+    maxAttempts: 8,
+    now: 1000,
+  })
+  assert.equal(withoutChain.length, 1)
+  assert.equal(withoutChain[0].accountId, 'default')
+})
+
+test('planAttempts caps pooled attempts', () => {
+  const accounts = Array.from({ length: 4 }, (_, index) => ({
+    id: index === 0 ? 'default' : `a${index}`,
+    label: `account ${index}`,
+    kind: index === 0 ? 'default' : 'added',
+    healthKey: `account:opencode-go:${index}`,
+  }))
+  const attempts = planAttempts({
+    provider: 'opencode-go',
+    model: 'm',
+    chain: normalizeChain([{ provider: 'backup', model: 'bm' }]),
+    accounts,
+    health: createHealthStore({ now: () => 0 }),
+    maxAttempts: 2,
+  })
+  assert.equal(attempts.length, 2)
+})
+
 test('isFallbackFailure matches only configured codes', () => {
   assert.equal(isFallbackFailure({ code: 'QUOTA' }, ['QUOTA']), true)
   assert.equal(isFallbackFailure({ code: 'AUTH' }, ['QUOTA']), false)

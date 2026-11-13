@@ -21,6 +21,13 @@ your Harness profile.
   `deepseek-account`, `deepseek-official`, custom gateways, …) together with
   each route's own model catalog. Adding a router to the chain needs no key,
   endpoint, or model list.
+- **Several API accounts on one router** — connect multiple `opencode-go` (or
+  `opencode`) accounts to the same router. Each request rotates the account key
+  through the documented `llm-pi-ai/request-headers` waterfall; an exhausted
+  account is skipped with its own cooldown and the next account answers before
+  the chain moves on. Keys live in the Harness credentials store — never in
+  configuration or the state file. Accounts are tested, skipped, resumed and
+  reordered from the panel.
 - **Per-request attempt chain** — requests start at the router you selected in
   the composer, then continue down the chain. Order is editable from the panel.
 - **Cooldown after exhaustion** — a router that reported an exhausted quota is
@@ -79,6 +86,34 @@ Requests start at the router selected in the composer and walk down the chain.
 If the selected router is not in the chain, it is tried first and the chain is
 used as its fallback list. Routes in cooldown are skipped.
 
+### Multiple opencode-go accounts
+
+In the **opencode-go accounts** section:
+
+1. The first row is the **default account**: it uses the key configured in
+   *Settings → Models* (`OPENCODE_GO_API_KEY` in the profile).
+2. Paste another account's key and press **Add account**. The key is stored
+   through the credentials service under a generated
+   `DSH_FALLBACK_OPENCODE_GO_*` reference; the account joins the rotation in
+   the order shown (use ↑/↓ to change it).
+3. **Test** sends one tiny request with that account's key and reports the
+   result. **Skip 30 min** takes an account out of rotation without deleting
+   it; **Resume** puts it back.
+4. Requests to `opencode-go` try its accounts in order, then continue down the
+   fallback chain. If every account is cooling down, the chain answers (and if
+   nothing is healthy, the first account is tried so its real failure is
+   shown).
+
+Because rotation happens at the pi-ai header seam, it works for every model on
+the route — including `anthropic-messages` models (`x-api-key`) and
+`google-generative-ai` models (`x-goog-api-key`). The plugin reads the model →
+protocol map from the pi-ai catalog shipped with the running Harness and keeps
+an embedded snapshot for installations where that catalog cannot be read.
+
+Account keys are only written to the Harness credentials store. Deleting an
+account removes its key reference; the plugin never logs a key, and the state
+file contains labels and references only.
+
 ## Configuration
 
 The bundle row's `config` is the deployment default (empty chain, quota codes,
@@ -112,6 +147,14 @@ attempt through the normal adapter path, and only re-dispatches
 *before* any content became visible. Everything else — session log, streaming,
 tool calls, turn errors — is the shipped behavior.
 
+Pooled accounts are an attempt dimension on the same route: the plan lists the
+route's accounts (default first, then added accounts), each with its own health
+key, followed by the chain. Each attempt's key is carried into
+`llm-pi-ai/request-headers` through Node's async-local storage, because that
+waterfall receives only routing metadata. Writing the protocol's auth header
+there overrides the route's configured key for that request only (verified
+against the live pi-ai adapter: a wrong contributed key fails with `AUTH`).
+
 Known consequences of doing this at the LLM seam:
 
 - The durable assistant message keeps the **originally selected** provider/model
@@ -125,7 +168,13 @@ Known consequences of doing this at the LLM seam:
   `[dsh-fallback: fallback chain exhausted]` suffix on the message.
 - Only quota/limit-style codes are handled. Context-overflow, invalid-request
   and auth failures are surfaced, not silently moved, because another router
-  would fail the same way.
+  would fail the same way. Add `AUTH` to the trigger codes if an invalid
+  account key should fall through to the next account/router instead.
+- Account pooling is offered for `opencode-go` and `opencode`; the underlying
+  key override works for any pi-ai route, but the panel intentionally limits
+  the list. Model → protocol mapping prefers the installed pi-ai catalog and
+  falls back to an embedded snapshot; an unknown model is assumed
+  OpenAI-compatible (`authorization: Bearer`).
 - `deepseek-official` may advertise no model catalog in some profiles; it can
   still be added with `Use the selected model`.
 

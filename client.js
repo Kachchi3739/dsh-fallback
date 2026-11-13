@@ -110,6 +110,34 @@ window.__ModuleLoader__.load({
         minutes: 'min',
         none: 'none',
         summary: 'Answering router',
+        accountsTitle: 'opencode-go accounts',
+        accountsHint:
+          'Connect several API keys (accounts) to the same opencode-go router. If one account is exhausted, the plugin tries the next account and only then moves on down the fallback chain. The first account (default) uses the key configured in Settings → Models.',
+        accountDefault: 'default account',
+        accountDefaultHint: 'uses the key from Settings → Models',
+        accountAdded: 'added account',
+        accountKeyPresent: 'key stored',
+        accountKeyMissing: 'key missing',
+        accountAddLabel: 'Label',
+        accountAddLabelPlaceholder: 'e.g. account 2',
+        accountAddKey: 'API key',
+        accountAddKeyPlaceholder: 'paste the opencode-go key',
+        accountAdd: 'Add account',
+        accountAdding: 'Adding…',
+        accountRemove: 'Remove',
+        accountTest: 'Test',
+        accountTesting: 'Testing…',
+        accountSkip: 'Skip 30 min',
+        accountResume: 'Resume',
+        accountModel: 'model:',
+        accountTestOk: 'answered',
+        accountTestFailed: 'failed',
+        accountNeedsKey: 'Enter the account API key.',
+        accountSupportsHint:
+          'Accounts are rotated per request through the pi-ai header waterfall; keys are stored in the Harness credentials store, never in configuration or the state file.',
+        accountsUnavailable: 'The credentials service is unavailable in this profile, so accounts cannot be stored.',
+        accountEmpty: 'Only the default account is in use.',
+        accountsChainHint: 'Requests for opencode-go try its accounts in this order, then continue down the fallback chain.',
       },
       ko: {
         nav: '라우터 폴백',
@@ -177,6 +205,33 @@ window.__ModuleLoader__.load({
         minutes: '분',
         none: '없음',
         summary: '응답 라우터',
+        accountsTitle: 'opencode-go 계정',
+        accountsHint:
+          '같은 opencode-go 라우터에 여러 API 키(계정)를 연결합니다. 한 계정이 한도를 소진하면 다음 계정을 시도하고, 계정이 모두 소진된 뒤에야 폴백 체인의 다음 라우터로 넘어갑니다. 첫 번째(기본) 계정은 설정 → 모델에 저장된 키를 사용합니다.',
+        accountDefault: '기본 계정',
+        accountDefaultHint: '설정 → 모델의 키 사용',
+        accountAdded: '추가 계정',
+        accountKeyPresent: '키 저장됨',
+        accountKeyMissing: '키 없음',
+        accountAddLabel: '이름',
+        accountAddLabelPlaceholder: '예: 계정 2',
+        accountAddKey: 'API 키',
+        accountAddKeyPlaceholder: 'opencode-go 키를 붙여넣으세요',
+        accountAdd: '계정 추가',
+        accountAdding: '추가 중…',
+        accountRemove: '삭제',
+        accountTest: '테스트',
+        accountTesting: '테스트 중…',
+        accountSkip: '30분 건너뛰기',
+        accountResume: '다시 사용',
+        accountModel: '모델:',
+        accountTestOk: '응답',
+        accountTestFailed: '실패',
+        accountNeedsKey: '계정 API 키를 입력하세요.',
+        accountSupportsHint:
+          '계정은 요청마다 pi-ai 헤더 워터폴로 교체되며, 키는 Harness 자격 증명 저장소에만 보관됩니다(설정·상태 파일에는 남지 않음).',
+        accountEmpty: '기본 계정만 사용 중입니다.',
+        accountsChainHint: 'opencode-go 요청은 이 순서로 계정을 시도한 뒤 폴백 체인으로 이어집니다.',
       },
     }
 
@@ -266,6 +321,17 @@ window.__ModuleLoader__.load({
       },
       input: {
         width: 92,
+        font: 'inherit',
+        fontSize: 12,
+        color: 'var(--dsw-alias-label-primary)',
+        background: 'var(--dsw-alias-bg-base)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 6,
+        padding: '4px 6px',
+      },
+      textInput: {
+        flex: '1 1 140px',
+        minWidth: 0,
         font: 'inherit',
         fontSize: 12,
         color: 'var(--dsw-alias-label-primary)',
@@ -452,6 +518,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [notice, setNotice] = useState(null)
       const [testResult, setTestResult] = useState(null)
+      const [accountForm, setAccountForm] = useState({ label: '', key: '' })
+      const [accountBusy, setAccountBusy] = useState(null)
+      const [accountResult, setAccountResult] = useState(null)
       const dirtyRef = useRef(false)
 
       const locale = (key) => {
@@ -597,6 +666,115 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // -----------------------------------------------------------------
+      // Pooled opencode-go accounts
+      // -----------------------------------------------------------------
+
+      const accountsOf = (nextPayload, provider) =>
+        (nextPayload.accounts?.providers ?? []).find((entry) => entry.provider === provider) ?? null
+
+      const applyAccountsPayload = (accountsPayload) => {
+        setPayload((current) => (current === null ? current : { ...current, accounts: accountsPayload }))
+      }
+
+      const runAccountAction = async (path, body) => {
+        const result = await request(path, { method: 'POST', body: JSON.stringify(body) })
+        if (result.accounts !== undefined) applyAccountsPayload(result.accounts)
+        return result
+      }
+
+      const createAccount = async (provider) => {
+        if (accountForm.key.trim().length === 0) {
+          setError(locale('accountNeedsKey'))
+          return
+        }
+        setAccountBusy('create')
+        setError(null)
+        try {
+          const result = await request('/accounts/create', {
+            method: 'POST',
+            body: JSON.stringify({ provider, label: accountForm.label, key: accountForm.key }),
+          })
+          if (result.accounts !== undefined) applyAccountsPayload(result.accounts)
+          setAccountForm({ label: '', key: '' })
+          setNotice(locale('saved'))
+        } catch (createError) {
+          setError(createError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const removeAccountRow = async (provider, id, label) => {
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          if (window.confirm(`${locale('accountRemove')}: ${label ?? id}?`) !== true) return
+        }
+        setAccountBusy(id)
+        try {
+          await runAccountAction('/accounts/remove', { provider, id })
+          setError(null)
+        } catch (removeError) {
+          setError(removeError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const skipAccountRow = async (provider, id) => {
+        setAccountBusy(id)
+        try {
+          await runAccountAction('/accounts/skip', { provider, id, minutes: 30 })
+        } catch (skipError) {
+          setError(skipError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const resumeAccountRow = async (provider, id) => {
+        setAccountBusy(id)
+        try {
+          await runAccountAction('/accounts/resume', { provider, id })
+        } catch (resumeError) {
+          setError(resumeError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const moveAccountRow = async (provider, rows, index, direction) => {
+        const target = index + direction
+        if (target < 0 || target >= rows.length) return
+        const ids = rows.map((row) => row.id)
+        const [moved] = ids.splice(index, 1)
+        ids.splice(target, 0, moved)
+        setAccountBusy('order')
+        try {
+          await runAccountAction('/accounts/reorder', { provider, ids })
+        } catch (orderError) {
+          setError(orderError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const testAccountRow = async (provider, id) => {
+        setAccountBusy(`test:${id}`)
+        setAccountResult(null)
+        try {
+          const result = await request('/accounts/test', {
+            method: 'POST',
+            body: JSON.stringify({ provider, id }),
+          })
+          setAccountResult({ provider, id, ...result.result })
+          setError(null)
+        } catch (testError) {
+          setError(testError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
       const updateDraft = useCallback((mutate) => {
         setDraft((current) => {
           if (current === null) return current
@@ -734,6 +912,165 @@ window.__ModuleLoader__.load({
                   locale('healthReset'),
                 ),
               ),
+            ),
+
+        payload === null || payload.accounts === undefined
+          ? null
+          : h(
+              'div',
+              { style: styles.card },
+              h('h2', { style: styles.cardTitle }, locale('accountsTitle')),
+              h('p', { style: styles.hint }, locale('accountsHint')),
+              payload.accounts.credentialsAvailable === false
+                ? h('p', { style: styles.warning }, locale('accountsUnavailable'))
+                : null,
+              (payload.accounts.providers ?? []).map((entry) => {
+                const rows = entry.accounts ?? []
+                const addedRows = rows.filter((row) => row.kind === 'added')
+                return h(
+                  'div',
+                  { key: entry.provider, style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                  h(
+                    'div',
+                    { style: styles.spread },
+                    h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, `${entry.displayName} (${entry.provider})`),
+                    h('span', { style: styles.muted }, locale('accountsChainHint')),
+                  ),
+                  rows.length === 1
+                    ? h('p', { style: styles.hint }, locale('accountEmpty'))
+                    : null,
+                  rows.map((account) => {
+                    const isDefault = account.kind === 'default'
+                    const cooling = account.degraded !== null && account.degraded !== undefined
+                    const addedIndex = addedRows.findIndex((row) => row.id === account.id)
+                    const testing = accountBusy === `test:${account.id}`
+                    return h(
+                      'div',
+                      { key: account.id, style: styles.chainRow },
+                      h(
+                        'div',
+                        { style: styles.chainHead },
+                        h('span', { style: styles.index }, isDefault ? '1' : String(addedIndex + 2)),
+                        h(
+                          'div',
+                          { style: styles.chainMeta },
+                          h('span', { style: styles.providerName }, isDefault ? locale('accountDefault') : account.label),
+                          h(
+                            'span',
+                            { style: styles.providerId },
+                            `${
+                              isDefault
+                                ? locale('accountDefaultHint')
+                                : `${locale('accountAdded')} · ${account.keyPresent === false ? locale('accountKeyMissing') : locale('accountKeyPresent')}`
+                            }${cooling ? ` · ${locale('healthCooling')} (${account.degraded.code}, ${formatRemaining(account.degraded.remainingMs)})` : ''}`,
+                          ),
+                        ),
+                        cooling ? h('span', { style: styles.badBadge }, locale('healthCooling')) : h('span', { style: styles.okBadge }, locale('healthReady')),
+                      ),
+                      h(
+                        'div',
+                        { style: styles.chainControls },
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: styles.smallButton,
+                            disabled: accountBusy !== null,
+                            onClick: () => testAccountRow(entry.provider, account.id),
+                          },
+                          testing ? locale('accountTesting') : locale('accountTest'),
+                        ),
+                        cooling
+                          ? h(
+                              'button',
+                              { type: 'button', style: styles.smallButton, disabled: accountBusy !== null, onClick: () => resumeAccountRow(entry.provider, account.id) },
+                              locale('accountResume'),
+                            )
+                          : h(
+                              'button',
+                              { type: 'button', style: styles.smallButton, disabled: accountBusy !== null, onClick: () => skipAccountRow(entry.provider, account.id) },
+                              locale('accountSkip'),
+                            ),
+                        isDefault
+                          ? null
+                          : h(
+                              'button',
+                              { type: 'button', style: styles.smallButton, onClick: () => moveAccountRow(entry.provider, addedRows, addedIndex, -1), disabled: addedIndex === 0 },
+                              '↑',
+                            ),
+                        isDefault
+                          ? null
+                          : h(
+                              'button',
+                              {
+                                type: 'button',
+                                style: styles.smallButton,
+                                onClick: () => moveAccountRow(entry.provider, addedRows, addedIndex, 1),
+                                disabled: addedIndex === addedRows.length - 1,
+                              },
+                              '↓',
+                            ),
+                        isDefault
+                          ? null
+                          : h(
+                              'button',
+                              {
+                                type: 'button',
+                                style: styles.smallButton,
+                                disabled: accountBusy !== null,
+                                onClick: () => removeAccountRow(entry.provider, account.id, account.label),
+                              },
+                              locale('accountRemove'),
+                            ),
+                      ),
+                    )
+                  }),
+                  accountResult !== null && accountResult.provider === entry.provider
+                    ? h(
+                        'p',
+                        { style: accountResult.ok === true ? styles.hint : styles.error, role: 'status' },
+                        `${locale('accountModel')} ${accountResult.model} · ${
+                          accountResult.ok === true
+                            ? `${locale('accountTestOk')}: ${accountResult.account?.label ?? locale('accountDefault')} (${accountResult.latencyMs} ms)`
+                            : `${locale('accountTestFailed')}: ${accountResult.failure?.code ?? 'ERROR'} ${accountResult.failure?.message ?? ''}`
+                        }`,
+                      )
+                    : null,
+                  entry.registered && payload.accounts.credentialsAvailable !== false
+                    ? h(
+                        'div',
+                        { style: { ...styles.row, marginTop: 2 } },
+                        h('input', {
+                          type: 'text',
+                          style: styles.textInput,
+                          placeholder: locale('accountAddLabelPlaceholder'),
+                          value: accountForm.label,
+                          onChange: (event) => setAccountForm((current) => ({ ...current, label: event.target.value })),
+                        }),
+                        h('input', {
+                          type: 'password',
+                          style: styles.textInput,
+                          placeholder: locale('accountAddKeyPlaceholder'),
+                          value: accountForm.key,
+                          onChange: (event) => setAccountForm((current) => ({ ...current, key: event.target.value })),
+                          autoComplete: 'off',
+                          spellCheck: false,
+                        }),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            style: styles.primaryButton,
+                            disabled: accountBusy !== null,
+                            onClick: () => createAccount(entry.provider),
+                          },
+                          accountBusy === 'create' ? locale('accountAdding') : locale('accountAdd'),
+                        ),
+                      )
+                    : null,
+                  h('p', { style: styles.muted }, locale('accountSupportsHint')),
+                )
+              }),
             ),
 
         draft === null
@@ -1027,11 +1364,23 @@ window.__ModuleLoader__.load({
                             event.kind,
                           ),
                           event.from !== null && event.from !== undefined
-                            ? h('span', { style: styles.mono }, `${event.from.provider}/${event.from.model}`)
+                            ? h(
+                                'span',
+                                { style: styles.mono },
+                                `${event.from.provider}/${event.from.model}${
+                                  event.from.account === undefined ? '' : ` [${event.from.account.label ?? event.from.account.id}]`
+                                }`,
+                              )
                             : null,
                           h('span', { style: styles.muted }, '→'),
                           event.to !== null && event.to !== undefined
-                            ? h('span', { style: styles.mono }, `${event.to.provider}/${event.to.model}`)
+                            ? h(
+                                'span',
+                                { style: styles.mono },
+                                `${event.to.provider}/${event.to.model}${
+                                  event.to.account === undefined ? '' : ` [${event.to.account.label ?? event.to.account.id}]`
+                                }`,
+                              )
                             : h('span', { style: styles.muted }, '—'),
                           event.code ? h('span', { style: styles.mono }, event.code) : null,
                           event.latencyMs !== undefined ? h('span', { style: styles.muted }, `${event.latencyMs} ms`) : null,
