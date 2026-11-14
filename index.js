@@ -330,9 +330,15 @@ export function apply(ctx, rawConfig = {}) {
       }
       attempts = checked.length > 0 ? checked : attempts.slice(0, 1)
     }
+    const onlyAttempt = attempts.length === 1 ? attempts[0] : null
+    const onlyAttemptNeedsKey =
+      onlyAttempt !== null &&
+      onlyAttempt.accountId !== undefined &&
+      onlyAttempt.accountId !== DEFAULT_ACCOUNT_ID
     const hasFallback =
       attempts.length > 1 ||
-      (attempts.length === 1 && (attempts[0].provider !== options.provider || attempts[0].model !== options.model))
+      (onlyAttempt !== null &&
+        (onlyAttempt.provider !== options.provider || onlyAttempt.model !== options.model || onlyAttemptNeedsKey))
     if (!hasFallback) {
       yield* next()
       return

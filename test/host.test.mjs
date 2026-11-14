@@ -961,6 +961,37 @@ test('a fallback chain route uses its pooled accounts', async () => {
   }
 })
 
+test('an added account serves alone when the default account is cooling down', async () => {
+  const harness = setup({
+    adapters: { 'opencode-go': keyAwareAdapter('opencode-go') },
+    rowConfig: { enabled: false, chain: [], accountMode: 'rotate' },
+  })
+  try {
+    await createAccount(harness, {})
+    await harness.call('/accounts/skip', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', id: 'default', minutes: 30 }),
+    })
+    const chunks = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    assert.equal(finishOf(chunks)?.reason.kind, 'stop')
+    assert.equal(textOf(chunks), 'hello from an account')
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      ['Bearer oc_sk_test_account_2'],
+    )
+    const { body } = await harness.call('/accounts/rotation-test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', runs: 2 }),
+    })
+    assert.equal(body.result.ok, true)
+    const added = body.result.accounts.find((entry) => entry.kind === 'added')
+    assert.equal(added.requests, 2)
+    assert.equal(added.successes, 2)
+  } finally {
+    harness.finish()
+  }
+})
+
 test('the rotation test proves both accounts serve ordinary requests', async () => {
   const harness = opencodeHarness()
   try {

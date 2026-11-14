@@ -23,8 +23,14 @@
 
 - Rotation bookkeeping lives in `lib/rotation.mjs` and is covered by unit tests;
   the state file gains only the `accountMode` override (no new secrets).
-- Tests grew from 64 to 84 (rotation, DSH-wide pool, sticky/failover, chain-route
+- Tests grew from 64 to 85 (rotation, DSH-wide pool, sticky/failover, chain-route
   pools and the rotation-test endpoint).
+
+### Fixed
+
+- A route whose default key is cooling down now still uses its remaining added
+  account. Previously a single healthy account was mistaken for "no fallback"
+  and the exhausted route key was called directly.
 
 ## 1.1.0 — 2026-11-14
 
