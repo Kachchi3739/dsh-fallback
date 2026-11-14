@@ -1,6 +1,18 @@
 # Dependencies are never vendored: the plugin imports only Node.js built-ins.
 node_modules/
 
+# Never commit local credentials, environment files or private keys.
+.env
+.env.*
+.credentials*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local plugin state (account references, events) is not source.
+.dsh-fallback/
+
 # Research notes, browser-automation scripts and captured artifacts are local
 # working material, not part of the plugin.
 research/

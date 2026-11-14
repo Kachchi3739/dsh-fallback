@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.3.0 — 2026-11-14
+
+### Security
+
+- The settings API now validates every request with DSH's `connection` trust
+  service (Host/Origin checks and browser authentication) when it is mounted.
+  Without that service it accepts only loopback hosts, same-origin JSON POSTs
+  carrying the `x-dsh-fallback-request: 1` marker, and rejects cross-site
+  requests. This closes the cross-origin write path that allowed a malicious
+  page to add accounts or change the routing configuration.
+- Requests carry `X-Content-Type-Options: nosniff`, and provider error envelopes
+  returned by self-test/rotation endpoints no longer include provider URLs or
+  organization identifiers.
+- The expensive account-test and rotation-test endpoints are single-flight with
+  a short cooldown, so a caller cannot parallelize quota-consuming probes.
+- The state writer creates its directory with mode `0700` and its file with mode
+  `0600` where the filesystem honors POSIX modes.
+
+### Privacy
+
+- State events store a short hash of the session id (`session:<8 hex>`) instead
+  of the full id, and stored provider failure messages redact URLs, `org_*`
+  identifiers and key-shaped tokens.
+- `/state` and `/accounts` redact the user's home directory from the state and
+  catalog paths.
+- The README screenshot no longer includes the DSH sidebar/session list, and the
+  repository history was rewritten so earlier screenshots are not recoverable
+  from normal git history.
+- `.gitignore` now excludes `.env*`, `.credentials*`, `*.pem`, `*.key`, `*.p12`,
+  `*.pfx` and `.dsh-fallback/`.
+- Added `SECURITY.md` documenting the local API trust model and the credential
+  store's at-rest caveat.
+
+### Changed
+
+- CI uses Node 24 (the local test runtime), pins `actions/checkout` and
+  `actions/setup-node` to commit SHAs, disables persisted credentials and grants
+  only `contents: read`.
+- Tests cover request marker/content-type/Origin/Host rejection, connection
+  rejection, and state redaction.
+
 ## 1.2.1 — 2026-11-14
 
 ### Fixed

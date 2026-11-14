@@ -471,7 +471,11 @@ window.__ModuleLoader__.load({
       const response = await fetch(`${API}${path}`, {
         cache: 'no-store',
         ...init,
-        headers: { 'content-type': 'application/json', ...(init && init.headers ? init.headers : {}) },
+        headers: {
+          'content-type': 'application/json',
+          'x-dsh-fallback-request': '1',
+          ...(init && init.headers ? init.headers : {}),
+        },
       })
       let body = null
       try {

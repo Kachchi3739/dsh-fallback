@@ -59,11 +59,15 @@ import {
   loadState,
   mergeOverrides,
   normalizeOverrides,
+  redactHealth,
+  redactMessage,
+  redactPath,
+  redactSessionId,
   resolveStateFile,
 } from './lib/state.mjs'
 
 /** Must match `version` in package.json (asserted by the test suite). */
-export const PLUGIN_VERSION = '1.2.1'
+export const PLUGIN_VERSION = '1.3.0'
 
 /** Same-origin HTTP prefix consumed by `client.js`. */
 const ROUTE_PREFIX = '/dsh-fallback'
@@ -88,6 +92,11 @@ export function apply(ctx, rawConfig = {}) {
   const catalog = createProviderCatalog({ llm })
   const modelApis = createModelProtocolLookup()
   const credentials = ctx.get('credentials')
+  // DSH's connection service applies the same Host/Origin trust rules and
+  // browser authentication it uses for its own routes. When it is mounted,
+  // every plugin route is authenticated by it; the checks below are the
+  // fallback for profiles that do not mount it.
+  const connection = ctx.get('connection')
   // Carries the account chosen for one attempt into the pi-ai header
   // waterfall, which only receives routing metadata (no request object).
   const headerContext = new AsyncLocalStorage()
@@ -108,6 +117,22 @@ export function apply(ctx, rawConfig = {}) {
   /** Rotation cursors and sticky session assignments for pooled accounts. */
   const rotation = createRotationState()
   let probeInFlight = false
+  /** Single-flight and cooldown guards for the expensive test endpoints. */
+  const busyRoutes = new Set()
+  const routeCooldowns = new Map()
+
+  const guarded = async (name, cooldownMs, work) => {
+    const now = Date.now()
+    const until = routeCooldowns.get(name) ?? 0
+    if (busyRoutes.has(name) || now < until) throw new HttpError(429, 'busy')
+    busyRoutes.add(name)
+    routeCooldowns.set(name, now + cooldownMs)
+    try {
+      return await work()
+    } finally {
+      busyRoutes.delete(name)
+    }
+  }
 
   /**
    * Wrap one attempt's chunk stream so every pull runs inside the account
@@ -151,6 +176,17 @@ export function apply(ctx, rawConfig = {}) {
     model: attempt.model,
     ...(accountOf(attempt) === null ? {} : { account: accountOf(attempt) }),
   })
+  /** Provider failure envelope safe to return to the page (no org ids or URLs). */
+  const publicFailure = (failure) =>
+    failure === null || failure === undefined
+      ? null
+      : {
+          ...(typeof failure.code === 'string' ? { code: failure.code } : {}),
+          ...(Number.isFinite(Number(failure.status)) ? { status: Number(failure.status) } : {}),
+          message: redactMessage(failure.message),
+        }
+  /** Error text safe for responses and logs: no home path, URL, org id or token. */
+  const publicMessage = (error) => redactPath(redactMessage(messageOf(error)))
 
   const recordAttemptEvent = (event, attempts, options, config) => {
     if (event.type === 'attempt-start') {
@@ -158,20 +194,23 @@ export function apply(ctx, rawConfig = {}) {
       return
     }
     const attempt = event.attempt
+    const sessionId = redactSessionId(options.sessionId)
     if (event.type === 'attempt-failed') {
       const eligible = event.eligible === true
+      const storedFailure =
+        event.failure === undefined ? undefined : { ...event.failure, message: redactMessage(event.failure.message) }
       // Only an exhausted/ineligible-free route is cooled down: a bad request
       // (INVALID_REQUEST and friends) says nothing about route health, but a
       // zero-length window still records the failure in the stats.
-      health.markFailure(healthKeyOf(attempt), event.failure, eligible ? cooldownFor(event.failure, config) : 0)
+      health.markFailure(healthKeyOf(attempt), storedFailure, eligible ? cooldownFor(event.failure, config) : 0)
       const next = attempts[event.index + 1]
       events.record({
         kind: eligible && next !== undefined ? 'fallback' : 'failure',
-        sessionId: typeof options.sessionId === 'string' ? options.sessionId : null,
+        sessionId,
         from: attemptEndpoint(attempt),
         to: next === undefined ? null : attemptEndpoint(next),
         code: typeof event.failure?.code === 'string' ? event.failure.code : 'UNKNOWN',
-        message: typeof event.failure?.message === 'string' ? event.failure.message.slice(0, 240) : '',
+        message: redactMessage(event.failure?.message),
         latencyMs: event.latencyMs,
       })
       runtime.lastResult = {
@@ -189,7 +228,7 @@ export function apply(ctx, rawConfig = {}) {
       if (event.index > 0) {
         events.record({
           kind: 'answered',
-          sessionId: typeof options.sessionId === 'string' ? options.sessionId : null,
+          sessionId,
           from: null,
           to: attemptEndpoint(attempt),
           code: null,
@@ -223,7 +262,7 @@ export function apply(ctx, rawConfig = {}) {
     if (event.type === 'attempt-failed') {
       record.ok = false
       record.code = typeof event.failure?.code === 'string' ? event.failure.code : 'UNKNOWN'
-      record.message = typeof event.failure?.message === 'string' ? event.failure.message.slice(0, 240) : ''
+      record.message = redactMessage(event.failure?.message)
       record.latencyMs = event.latencyMs
       return
     }
@@ -460,7 +499,7 @@ export function apply(ctx, rawConfig = {}) {
     } catch (error) {
       probeInFlight = false
       clearTimeout(timer)
-      return { ok: false, error: 'probe-unavailable', message: messageOf(error) }
+      return { ok: false, error: 'probe-unavailable', message: publicMessage(error) }
     }
     try {
       const stream = llm.stream(probeRequest({ log, chain: resolvedChain, signal: controller.signal, sessionId: probeSessionId() }))
@@ -471,7 +510,7 @@ export function apply(ctx, rawConfig = {}) {
       return {
         ok: failure === null,
         finishKind: finish?.reason?.kind ?? null,
-        failure,
+        failure: publicFailure(failure),
         aborted: controller.signal.aborted === true ? true : undefined,
         answered,
         attempts: log.attempts,
@@ -479,13 +518,13 @@ export function apply(ctx, rawConfig = {}) {
         totalMs: Date.now() - startedAt,
       }
     } catch (error) {
-      return { ok: false, error: 'probe-failed', message: messageOf(error), attempts: log.attempts }
+      return { ok: false, error: 'probe-failed', message: publicMessage(error), attempts: log.attempts }
     } finally {
       clearTimeout(timer)
       try {
         disposeProbe?.()
       } catch (error) {
-        ctx.logger?.warn?.('dsh-fallback: probe adapter disposal failed: %o', error)
+        ctx.logger?.warn?.('dsh-fallback: probe adapter disposal failed: %s', publicMessage(error))
       }
       probeInFlight = false
     }
@@ -509,7 +548,7 @@ export function apply(ctx, rawConfig = {}) {
 
   const buildAccountsPayload = async () => {
     const config = currentConfig()
-    const healthSnapshot = health.snapshot()
+    const healthSnapshot = redactHealth(health.snapshot())
     const degraded = healthSnapshot.degraded ?? {}
     const providers = []
     for (const provider of ACCOUNT_PROVIDERS) {
@@ -551,12 +590,13 @@ export function apply(ctx, rawConfig = {}) {
                   until: Number.isFinite(Number(record.until)) ? Number(record.until) : null,
                   remainingMs: Math.max(0, Number(record.until) - Date.now()),
                   code: typeof record.code === 'string' ? record.code : 'UNKNOWN',
-                  message: typeof record.message === 'string' ? record.message.slice(0, 240) : '',
+                  message: redactMessage(record.message),
                 },
         })
       }
       const models = await catalog.modelsFor(provider)
       const chainModel = config.chain.find((entry) => entry.provider === provider)?.model
+      const catalogStatus = modelApis.status()[provider] ?? null
       providers.push({
         provider,
         displayName: (() => {
@@ -571,7 +611,10 @@ export function apply(ctx, rawConfig = {}) {
         models,
         defaultModel: chainModel ?? models[0]?.id ?? '',
         maxAccounts: MAX_ACCOUNTS_PER_PROVIDER,
-        catalog: modelApis.status()[provider] ?? null,
+        catalog:
+          catalogStatus === null
+            ? null
+            : { ...catalogStatus, file: typeof catalogStatus.file === 'string' ? redactPath(catalogStatus.file) : null },
       })
     }
     return { providers, credentialsAvailable: credentials !== undefined, mode: config.accountMode, maxAttempts: config.maxAttempts }
@@ -596,7 +639,7 @@ export function apply(ctx, rawConfig = {}) {
     try {
       await credentials.set(keyRef, validation.key)
     } catch (error) {
-      throw new HttpError(500, `cannot store the account key: ${messageOf(error)}`)
+      throw new HttpError(500, `cannot store the account key: ${publicMessage(error)}`)
     }
     const added = addAccount(runtime.accounts, provider, {
       id,
@@ -713,7 +756,7 @@ export function apply(ctx, rawConfig = {}) {
         ok: failure === null,
         account: { id: account.id, label: account.label, kind: account.kind },
         model,
-        failure,
+        failure: publicFailure(failure),
         text: outcome.text.slice(0, 200),
         latencyMs: Date.now() - startedAt,
       }
@@ -759,7 +802,7 @@ export function apply(ctx, rawConfig = {}) {
         const failure = outcome.finish?.reason?.kind === 'error' ? outcome.finish.reason.failure : null
         results.push({
           ok: failure === null,
-          failure,
+          failure: publicFailure(failure),
           text: typeof outcome.text === 'string' ? outcome.text.slice(0, 120) : '',
           latencyMs: Date.now() - startedAt,
         })
@@ -793,7 +836,7 @@ export function apply(ctx, rawConfig = {}) {
 
   const statePayload = async () => {
     const config = currentConfig()
-    const healthSnapshot = health.snapshot()
+    const healthSnapshot = redactHealth(health.snapshot())
     const { providers, configurable } = await describeProviders({
       catalog,
       health: healthSnapshot,
@@ -827,7 +870,7 @@ export function apply(ctx, rawConfig = {}) {
       events: events.snapshot(),
       lastResult: runtime.lastResult,
       storage: {
-        file: stateFile,
+        file: redactPath(stateFile),
         writable: writer.lastError() === null,
         error: writer.lastError(),
       },
@@ -895,16 +938,30 @@ export function apply(ctx, rawConfig = {}) {
       return { status: 200, payload: await resumeAccount(parseJsonBody(bodyText)) }
     }
     if (path === `${ROUTE_PREFIX}/accounts/test`) {
-      return { status: 200, payload: { ok: true, result: await testAccount(parseJsonBody(bodyText)), now: Date.now() } }
+      return {
+        status: 200,
+        payload: {
+          ok: true,
+          result: await guarded('account-test', 750, () => testAccount(parseJsonBody(bodyText))),
+          now: Date.now(),
+        },
+      }
     }
     if (path === `${ROUTE_PREFIX}/accounts/rotation-test`) {
-      return { status: 200, payload: { ok: true, result: await runRotationTest(parseJsonBody(bodyText)), now: Date.now() } }
+      return {
+        status: 200,
+        payload: {
+          ok: true,
+          result: await guarded('rotation-test', 3000, () => runRotationTest(parseJsonBody(bodyText))),
+          now: Date.now(),
+        },
+      }
     }
     if (path === `${ROUTE_PREFIX}/models`) {
       const config = currentConfig()
       const { providers, configurable } = await describeProviders({
         catalog,
-        health: health.snapshot(),
+        health: redactHealth(health.snapshot()),
         chain: config.chain,
         refresh: searchParams.get('refresh') === '1',
       })
@@ -942,14 +999,58 @@ export function apply(ctx, rawConfig = {}) {
 
   const handleNodeRequest = async (request, response) => {
     const method = String(request.method ?? 'GET').toUpperCase()
+    const headers = typeof request.headers === 'object' && request.headers !== null ? request.headers : {}
     let status = 500
     let payload = { ok: false, error: 'internal' }
     try {
       const url = new URL(String(request.url ?? '/'), 'http://localhost')
-      if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+      let rejection
+      if (connection !== undefined && typeof connection.requestRejection === 'function') {
+        try {
+          rejection = connection.requestRejection({ headers })
+        } catch {
+          rejection = 403
+        }
+      }
+      if (rejection !== undefined) {
+        status = rejection
+        payload = { ok: false, error: rejection === 401 ? 'unauthorized' : 'forbidden' }
+      } else if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
         status = 405
         payload = { ok: false, error: 'method-not-allowed' }
       } else {
+        if (method === 'POST') {
+          const contentType = String(headers['content-type'] ?? '').toLowerCase()
+          if (!contentType.startsWith('application/json')) {
+            throw new HttpError(415, 'unsupported-media-type: application/json is required')
+          }
+          if (headers['x-dsh-fallback-request'] !== '1') {
+            throw new HttpError(403, 'missing-request-marker')
+          }
+        }
+        const origin = headers.origin
+        if (typeof origin === 'string' && origin.length > 0) {
+          let originHost
+          try {
+            originHost = new URL(origin).host
+          } catch {
+            throw new HttpError(403, 'untrusted-origin')
+          }
+          if (typeof headers.host === 'string' && headers.host.length > 0 && originHost !== headers.host) {
+            throw new HttpError(403, 'untrusted-origin')
+          }
+        }
+        const site = headers['sec-fetch-site']
+        if (typeof site === 'string' && site.length > 0 && site !== 'same-origin' && site !== 'none') {
+          throw new HttpError(403, 'untrusted-site')
+        }
+        if (connection === undefined) {
+          const host = typeof headers.host === 'string' ? headers.host : ''
+          const hostname = host.startsWith('[') ? host.slice(1, host.indexOf(']')) : host.split(':')[0]
+          if (host.length > 0 && !['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
+            throw new HttpError(403, 'untrusted-host')
+          }
+        }
         const bodyText = method === 'POST' ? await readNodeBody(request) : ''
         const routed = await routeApi({ path: url.pathname, searchParams: url.searchParams, bodyText })
         status = routed.status
@@ -960,8 +1061,8 @@ export function apply(ctx, rawConfig = {}) {
         status = error.status
         payload = { ok: false, error: 'bad-request', message: error.message }
       } else {
-        ctx.logger?.warn?.('dsh-fallback: request failed: %o', error)
-        payload = { ok: false, error: 'internal', message: messageOf(error) }
+        ctx.logger?.warn?.('dsh-fallback: request failed: %s', publicMessage(error))
+        payload = { ok: false, error: 'internal', message: publicMessage(error) }
       }
     }
     try {
@@ -970,11 +1071,12 @@ export function apply(ctx, rawConfig = {}) {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
         'content-length': Buffer.byteLength(text),
+        'x-content-type-options': 'nosniff',
       })
       if (method === 'HEAD') response.end()
       else response.end(text)
     } catch (writeError) {
-      ctx.logger?.warn?.('dsh-fallback: response write failed: %o', writeError)
+      ctx.logger?.warn?.('dsh-fallback: response write failed: %s', publicMessage(writeError))
       try {
         response.destroy?.()
       } catch {
@@ -996,6 +1098,10 @@ export function apply(ctx, rawConfig = {}) {
     events.setLimit(currentConfig().logLimit)
     return () => writer.dispose()
   }, 'dsh-fallback: flush persisted state on unload')
+
+  // Rewrite a state file loaded from an older release once, so persisted
+  // session ids and provider error details are redacted at rest as well.
+  writer.schedule()
 
   ctx.logger?.info?.(
     'dsh-fallback: router fallback ready (chain: %s)',

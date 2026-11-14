@@ -10,6 +10,9 @@ import {
   loadState,
   mergeOverrides,
   normalizeOverrides,
+  redactMessage,
+  redactPath,
+  redactSessionId,
   resolveStateDir,
   resolveStateFile,
   saveState,
@@ -23,6 +26,44 @@ test('resolveStateDir prefers the profile dir, then DSH_HOME', () => {
   const fallback = resolveStateDir({ DSH_HOME: 'C:/home' })
   assert.equal(fallback, path.join('C:/home', 'fallback'))
   assert.equal(resolveStateFile({ DSH_PROFILE_DIR: 'C:/profile' }), path.join('C:/profile', '.dsh-fallback', 'state.json'))
+})
+
+test('redaction removes home paths, org ids, tokens and full session ids', () => {
+  const redacted = redactMessage('429 https://example.test/console/org_ABC123 sk-secretvalue1234567890')
+  assert.equal(redacted.includes('https://'), false)
+  assert.equal(redacted.includes('org_ABC123'), false)
+  assert.equal(redacted.includes('sk-secret'), false)
+  const tag = redactSessionId('session-abc')
+  assert.match(tag, /^session:[0-9a-f]{8}$/)
+  assert.equal(redactSessionId(tag), tag)
+  const home = process.env.USERPROFILE ?? process.env.HOME
+  if (typeof home === 'string' && home.length > 0) {
+    assert.equal(redactPath(`${home}\\.dsh\\state.json`).startsWith('~'), true)
+  }
+})
+
+test('loadState sanitizes persisted health and event details', () => {
+  const dir = tempDir()
+  try {
+    const file = path.join(dir, 'state.json')
+    const saved = saveState(file, {
+      ...emptyState(),
+      health: {
+        degraded: {
+          a: { until: 123, code: 'QUOTA', message: 'https://example.test/org_ABC123 secret' },
+        },
+      },
+      events: [{ at: 'now', sessionId: 'full-session-id', message: 'https://example.test/org_ABC123' }],
+    })
+    assert.equal(saved.ok, true)
+    const loaded = loadState(file)
+    assert.equal(loaded.health.degraded.a.message.includes('https://'), false)
+    assert.equal(loaded.health.degraded.a.message.includes('org_ABC123'), false)
+    assert.match(loaded.events[0].sessionId, /^session:[0-9a-f]{8}$/)
+    assert.equal(loaded.events[0].message.includes('https://'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('normalizeOverrides keeps only known, valid fields', () => {

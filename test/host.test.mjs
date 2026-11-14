@@ -88,7 +88,7 @@ let testHeaders = null
 /** The `Authorization` header the current attempt carried, when any. */
 const currentAuthorization = () => testHeaders?.get('authorization') ?? null
 
-function createFakeHarness() {
+function createFakeHarness(options = {}) {
   const adapters = new Map()
   const streamListeners = []
   const headerListeners = []
@@ -215,6 +215,7 @@ function createFakeHarness() {
       return () => {}
     },
     get(name) {
+      if (name === 'connection') return options.connection
       if (name === 'credentials') {
         return {
           async resolve(ref) {
@@ -253,12 +254,12 @@ async function jsonOf(promise) {
 }
 
 /** Spin up the plugin against a fake harness in a throwaway profile dir. */
-function setup({ adapters = {}, rowConfig = {}, profileDir = null } = {}) {
+function setup({ adapters = {}, rowConfig = {}, profileDir = null, connection = undefined } = {}) {
   const ownedProfileDir = profileDir === null
   const dir = profileDir ?? mkdtempSync(path.join(tmpdir(), 'dsh-fallback-test-'))
   const previousProfile = process.env.DSH_PROFILE_DIR
   process.env.DSH_PROFILE_DIR = dir
-  const harness = createFakeHarness()
+  const harness = createFakeHarness({ connection })
   for (const [provider, adapter] of Object.entries(adapters)) {
     harness.llm.registerAdapter([provider], adapter)
   }
@@ -275,9 +276,16 @@ function setup({ adapters = {}, rowConfig = {}, profileDir = null } = {}) {
   const route = harness.routes.find((entry) => entry.path === '/dsh-fallback')
   const call = async (suffix, init = {}) => {
     const bodyText = typeof init.body === 'string' ? init.body : ''
+    const headers = {
+      host: '127.0.0.1:60949',
+      'content-type': 'application/json',
+      'x-dsh-fallback-request': '1',
+      ...(init.headers ?? {}),
+    }
     const request = {
       method: init.method ?? 'GET',
       url: `/dsh-fallback${suffix}`,
+      headers,
       async *[Symbol.asyncIterator]() {
         if (bodyText.length > 0) yield Buffer.from(bodyText, 'utf8')
       },
@@ -455,6 +463,56 @@ test('invalid config payloads are rejected with 400', async () => {
     assert.equal(badShape.status, 400)
     const missing = await harness.call('/does-not-exist')
     assert.equal(missing.status, 404)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('the settings API requires its request marker, JSON and a trusted origin', async () => {
+  const harness = setup({ adapters: { primary: textAdapter('primary') } })
+  try {
+    const noMarker = await harness.call('/config', {
+      method: 'POST',
+      body: JSON.stringify({ patch: {} }),
+      headers: { 'x-dsh-fallback-request': '' },
+    })
+    assert.equal(noMarker.status, 403)
+    const textPlain = await harness.call('/config', {
+      method: 'POST',
+      body: JSON.stringify({ patch: {} }),
+      headers: { 'content-type': 'text/plain' },
+    })
+    assert.equal(textPlain.status, 415)
+    const crossSite = await harness.call('/state', { headers: { 'sec-fetch-site': 'cross-site' } })
+    assert.equal(crossSite.status, 403)
+    const evilOrigin = await harness.call('/state', { headers: { origin: 'https://evil.example' } })
+    assert.equal(evilOrigin.status, 403)
+    const evilHost = await harness.call('/state', { headers: { host: 'evil.example' } })
+    assert.equal(evilHost.status, 403)
+    const allowed = await harness.call('/state', { headers: { origin: 'http://127.0.0.1:60949' } })
+    assert.equal(allowed.status, 200)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('the connection service rejection owns the response', async () => {
+  const seen = []
+  const harness = setup({
+    adapters: { primary: textAdapter('primary') },
+    connection: {
+      requestRejection(request) {
+        seen.push(request)
+        return 401
+      },
+    },
+  })
+  try {
+    const result = await harness.call('/state')
+    assert.equal(result.status, 401)
+    assert.equal(result.body.ok, false)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].headers.host, '127.0.0.1:60949')
   } finally {
     harness.finish()
   }

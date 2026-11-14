@@ -156,6 +156,25 @@ missing file simply falls back to the bundle defaults.
 | Quota/balance skip | 30 min | Cooldown after `QUOTA`/`ACCOUNT_QUOTA`, unless the provider reports `retry-after`. |
 | Rate-limit skip | 60 s | Cooldown after `RATE_LIMIT`. |
 
+## Security and privacy
+
+- The settings API is served on loopback and is checked by DSH's connection
+  trust service (Host/Origin validation and browser authentication). It accepts
+  only same-origin JSON POSTs carrying the plugin's request marker; expensive
+  test endpoints are single-flight.
+- Added account keys are stored through the Harness credentials service, never
+  in the plugin configuration, state file, logs or API responses. The state file
+  keeps labels, credential references, counters and hashed session tags only.
+  Stored error messages redact provider URLs, organization ids and key-shaped
+  tokens; paths returned by the API redact the home directory.
+- The credentials store itself is owned by DSH. Depending on the release it may
+  be protected by OS access control rather than encrypted at rest; protect the
+  profile directory and do not sync it to untrusted storage. See
+  [SECURITY.md](SECURITY.md).
+- Fallback routes and pooled-provider accounts receive the request content by
+  design. Review the chain before routing sensitive conversations through
+  third-party routes.
+
 ## How it works
 
 The Host half attaches one `llm/stream` waterfall listener (a documented,
