@@ -655,6 +655,22 @@ const createAccount = (harness, body) =>
     body: JSON.stringify({ provider: 'opencode-go', label: '계정 2', key: 'oc_sk_test_account_2', ...body }),
   })
 
+/** An adapter whose route key (no rotated Authorization header) is exhausted. */
+function defaultKeyFailingAdapter(provider) {
+  const base = keyAwareAdapter(provider, { reply: 'from a pooled chain account' })
+  const original = base.stream
+  base.stream = async function* stream() {
+    if (currentAuthorization() === null) {
+      const error = new Error('QUOTA for the route key')
+      error.code = 'QUOTA'
+      error.failure = { code: 'QUOTA', message: 'QUOTA for the route key', status: 402 }
+      throw error
+    }
+    yield* original.call(base)
+  }
+  return base
+}
+
 test('an account key is stored in the credentials service, never in the state file', async () => {
   const harness = opencodeHarness()
   try {
@@ -837,5 +853,156 @@ test('accounts are loaded back from the state file after a plugin reload', async
     if (second !== null) second.finish()
     else first.finish()
     rmSync(profileDir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// DSH-wide account rotation and chain-route pools
+// ---------------------------------------------------------------------------
+
+test('pooled accounts rotate on every request even with router fallback off', async () => {
+  const harness = setup({
+    adapters: { 'opencode-go': keyAwareAdapter('opencode-go') },
+    rowConfig: { enabled: false, chain: [], accountMode: 'rotate' },
+  })
+  try {
+    await createAccount(harness, {})
+    const first = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    const second = await collect(harness.llm.stream({ provider: 'opencode-go', model: 'flash', messages: [] }))
+    assert.equal(finishOf(first)?.reason.kind, 'stop')
+    assert.equal(finishOf(second)?.reason.kind, 'stop')
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      [null, 'Bearer oc_sk_test_account_2'],
+    )
+    const { body } = await harness.call('/accounts')
+    assert.equal(body.accounts.mode, 'rotate')
+    const rows = body.accounts.providers.find((entry) => entry.provider === 'opencode-go').accounts
+    assert.equal(rows[0].stats.requests, 1)
+    assert.equal(rows[1].stats.requests, 1)
+  } finally {
+    harness.finish()
+  }
+})
+
+test('sticky mode keeps a session on one account and moves a new session to the next', async () => {
+  const harness = setup({
+    adapters: { 'opencode-go': keyAwareAdapter('opencode-go') },
+    rowConfig: { enabled: false, chain: [], accountMode: 'sticky' },
+  })
+  try {
+    await createAccount(harness, {})
+    const one = { provider: 'opencode-go', model: 'flash', messages: [], sessionId: 'session-one' }
+    await collect(harness.llm.stream(one))
+    await collect(harness.llm.stream(one))
+    await collect(harness.llm.stream({ ...one, sessionId: 'session-two' }))
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      [null, null, 'Bearer oc_sk_test_account_2'],
+    )
+    assert.deepEqual(harness.dispatches.map((entry) => entry.provider), ['opencode-go', 'opencode-go', 'opencode-go'])
+  } finally {
+    harness.finish()
+  }
+})
+
+test('failover mode keeps the first account until it fails', async () => {
+  const harness = setup({
+    adapters: { 'opencode-go': keyAwareAdapter('opencode-go') },
+    rowConfig: { enabled: false, chain: [], accountMode: 'failover' },
+  })
+  try {
+    await createAccount(harness, {})
+    const options = { provider: 'opencode-go', model: 'flash', messages: [], sessionId: 's' }
+    await collect(harness.llm.stream(options))
+    await collect(harness.llm.stream(options))
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      [null, null],
+    )
+  } finally {
+    harness.finish()
+  }
+})
+
+test('a fallback chain route uses its pooled accounts', async () => {
+  const harness = setup({
+    adapters: {
+      primary: failingAdapter('primary'),
+      'opencode-go': defaultKeyFailingAdapter('opencode-go'),
+      backup: textAdapter('backup'),
+    },
+    rowConfig: {
+      chain: [
+        { provider: 'primary', model: 'primary-model' },
+        { provider: 'opencode-go', model: 'flash' },
+        { provider: 'backup', model: 'backup-model' },
+      ],
+    },
+  })
+  try {
+    await createAccount(harness, {})
+    const chunks = await collect(
+      harness.llm.stream({ provider: 'primary', model: 'primary-model', messages: [] }),
+    )
+    assert.equal(textOf(chunks), 'from a pooled chain account')
+    assert.deepEqual(
+      harness.dispatches.map((entry) => `${entry.provider}:${entry.authorization ?? 'route'}`),
+      ['primary:route', 'opencode-go:route', 'opencode-go:Bearer oc_sk_test_account_2'],
+    )
+    const state = await harness.call('/state')
+    const event = state.body.events.find(
+      (entry) => entry.kind === 'fallback' && entry.from?.provider === 'opencode-go',
+    )
+    assert.equal(event.from.account.kind, 'default')
+    assert.equal(event.to.account.kind, 'added')
+  } finally {
+    harness.finish()
+  }
+})
+
+test('the rotation test proves both accounts serve ordinary requests', async () => {
+  const harness = opencodeHarness()
+  try {
+    await createAccount(harness, {})
+    const { body } = await harness.call('/accounts/rotation-test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'opencode-go', runs: 2 }),
+    })
+    assert.equal(body.result.ok, true)
+    assert.equal(body.result.runs, 2)
+    const byKind = Object.fromEntries(body.result.accounts.map((entry) => [entry.kind, entry]))
+    assert.equal(byKind.default.requests, 1)
+    assert.equal(byKind.added.requests, 1)
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      [null, 'Bearer oc_sk_test_account_2'],
+    )
+  } finally {
+    harness.finish()
+  }
+})
+
+test('the account usage mode is saved and applies to the pool', async () => {
+  const harness = opencodeHarness()
+  try {
+    await createAccount(harness, {})
+    const saved = await harness.call('/config', {
+      method: 'POST',
+      body: JSON.stringify({ patch: { accountMode: 'failover' } }),
+    })
+    assert.equal(saved.body.config.accountMode, 'failover')
+    assert.equal(saved.body.accounts.mode, 'failover')
+    const options = { provider: 'opencode-go', model: 'flash', messages: [] }
+    await collect(harness.llm.stream(options))
+    await collect(harness.llm.stream(options))
+    assert.deepEqual(
+      harness.dispatches.map((entry) => entry.authorization),
+      [null, null],
+    )
+    const persisted = JSON.parse(readFileSync(path.join(harness.profileDir, '.dsh-fallback', 'state.json'), 'utf8'))
+    assert.equal(persisted.overrides.accountMode, 'failover')
+  } finally {
+    harness.finish()
   }
 })

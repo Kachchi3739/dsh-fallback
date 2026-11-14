@@ -42,6 +42,7 @@ import {
   supportsAccounts,
   validateNewAccount,
 } from './lib/accounts.mjs'
+import { createRotationState, forgetAccountRotation, orderAccounts } from './lib/rotation.mjs'
 import { createModelProtocolLookup } from './lib/model-apis.mjs'
 import { createProviderCatalog, describeProviders, resolveChainModels, PROBE_PROVIDER } from './lib/providers.mjs'
 import {
@@ -62,7 +63,7 @@ import {
 } from './lib/state.mjs'
 
 /** Must match `version` in package.json (asserted by the test suite). */
-export const PLUGIN_VERSION = '1.1.0'
+export const PLUGIN_VERSION = '1.2.0'
 
 /** Same-origin HTTP prefix consumed by `client.js`. */
 const ROUTE_PREFIX = '/dsh-fallback'
@@ -104,6 +105,8 @@ export function apply(ctx, rawConfig = {}) {
     events: events.snapshot(),
   }))
   const internalRequests = new WeakMap()
+  /** Rotation cursors and sticky session assignments for pooled accounts. */
+  const rotation = createRotationState()
   let probeInFlight = false
 
   /**
@@ -255,42 +258,64 @@ export function apply(ctx, rawConfig = {}) {
       return
     }
     const probeLog = options[PROBE_LOG]
+    const isProbe = probeLog !== undefined
     // The account connection test dispatches with its own key context and must
-    // not be re-routed by the fallback chain.
+    // not be re-routed by the fallback chain or the account pool.
     if (options.purpose === 'dsh-fallback-account-test') {
       yield* next()
       return
     }
     const config = currentConfig()
-    if (!config.enabled && probeLog === undefined) {
+    const probeChain = options[PROBE_CHAIN]
+    const chain = isProbe
+      ? Array.isArray(probeChain) && probeChain.length > 0
+        ? probeChain
+        : config.chain
+      : config.enabled
+        ? config.chain
+        : []
+    // Pooled accounts: one route is served by several API keys and the plugin
+    // rotates them transparently. A pool applies to the selected route and to
+    // every chain route that supports accounts, and it stays active even when
+    // the fallback chain is disabled — that is what lets DSH itself use several
+    // opencode-go accounts in ordinary requests.
+    const pools = new Map()
+    if (!isProbe) {
+      const providers = new Set([options.provider])
+      for (const entry of chain) providers.add(entry.provider)
+      for (const provider of providers) {
+        if (!supportsAccounts(provider)) continue
+        const canonical = listAccounts(runtime.accounts, provider)
+        if (!canonical.some((account) => account.kind === 'added')) continue
+        const resolved = await resolveAccountKeys(provider, canonical)
+        if (!resolved.accounts.some((account) => account.kind === 'added')) continue
+        const ordered = orderAccounts({
+          accounts: resolved.accounts,
+          mode: config.accountMode,
+          provider,
+          sessionId: typeof options.sessionId === 'string' && options.sessionId.length > 0 ? options.sessionId : undefined,
+          health,
+          state: rotation,
+        })
+        pools.set(provider, { accounts: ordered, keys: resolved.keys })
+      }
+    }
+    if (!config.enabled && pools.size === 0 && !isProbe) {
       yield* next()
       return
     }
-    const probeChain = options[PROBE_CHAIN]
-    const chain = Array.isArray(probeChain) && probeChain.length > 0 ? probeChain : config.chain
-    const maxAttempts =
-      probeLog === undefined ? config.maxAttempts : Math.min(8, Math.max(config.maxAttempts, chain.length + 1))
-    // Pooled accounts: the selected route is served by several API keys and the
-    // plugin rotates them transparently. Only explicit added accounts count; a
-    // route with just its configured key keeps the legacy single-entry path.
-    let accountAttempts = []
-    let accountKeys = new Map()
-    if (probeLog === undefined && supportsAccounts(options.provider) && Array.isArray(runtime.accounts[options.provider])) {
-      const resolved = await resolveAccountKeys(options.provider, listAccounts(runtime.accounts, options.provider))
-      if (resolved.accounts.some((account) => account.kind !== 'default')) {
-        accountAttempts = resolved.accounts
-        accountKeys = resolved.keys
-      }
-    }
+    const accountsByProvider = {}
+    for (const [provider, pool] of pools) accountsByProvider[provider] = pool.accounts
+    const maxAttempts = isProbe ? Math.min(8, Math.max(config.maxAttempts, chain.length + 1)) : config.maxAttempts
     let attempts = planAttempts({
       provider: options.provider,
       model: options.model,
       chain,
-      accounts: accountAttempts,
+      accountsByProvider,
       health,
       fallbackCodes: config.fallbackCodes,
       maxAttempts,
-      ignoreHealth: probeLog !== undefined,
+      ignoreHealth: isProbe,
     })
     if (attempts.some((attempt) => attempt.inherited === true)) {
       const checked = []
@@ -314,9 +339,10 @@ export function apply(ctx, rawConfig = {}) {
     }
     let nextConsumed = false
     const dispatch = ({ attempt, options: attemptOptions }) => {
+      const pool = pools.get(attempt.provider)
       const isDefaultAccount = attempt.accountId === undefined || attempt.accountId === DEFAULT_ACCOUNT_ID
-      const key = attempt.accountId === undefined || isDefaultAccount ? null : (accountKeys.get(attempt.accountId) ?? null)
-      const context = accountAttempts.length === 0 ? null : { provider: options.provider, key }
+      const key = isDefaultAccount || pool === undefined ? null : (pool.keys.get(attempt.accountId) ?? null)
+      const context = attempt.accountId === undefined ? null : { provider: attempt.provider, key }
       const iterable =
         !nextConsumed && isDefaultAccount && attempt.provider === options.provider && attempt.model === options.model
           ? (nextConsumed = true, next())
@@ -495,12 +521,23 @@ export function apply(ctx, rawConfig = {}) {
           }
         }
         const record = degraded[account.healthKey]
+        const stats = healthSnapshot.stats?.[account.healthKey] ?? null
         accounts.push({
           id: account.id,
           label: account.kind === 'default' ? null : account.label,
           kind: account.kind,
           healthKey: account.healthKey,
           keyPresent,
+          stats:
+            stats === null
+              ? null
+              : {
+                  requests: Number(stats.requests ?? 0),
+                  successes: Number(stats.successes ?? 0),
+                  failures: Number(stats.failures ?? 0),
+                  lastAttemptAt: Number.isFinite(Number(stats.lastAttemptAt)) ? Number(stats.lastAttemptAt) : null,
+                  lastSuccessAt: Number.isFinite(Number(stats.lastSuccessAt)) ? Number(stats.lastSuccessAt) : null,
+                },
           degraded:
             record === undefined
               ? null
@@ -531,7 +568,7 @@ export function apply(ctx, rawConfig = {}) {
         catalog: modelApis.status()[provider] ?? null,
       })
     }
-    return { providers, credentialsAvailable: credentials !== undefined }
+    return { providers, credentialsAvailable: credentials !== undefined, mode: config.accountMode, maxAttempts: config.maxAttempts }
   }
 
   const requireAccountProvider = (value) => {
@@ -582,6 +619,7 @@ export function apply(ctx, rawConfig = {}) {
     if (!removed.ok) throw new HttpError(400, removed.error)
     runtime.accounts = removed.accounts
     health.markSuccess(accountHealthKey(provider, id))
+    forgetAccountRotation(rotation, provider, id)
     if (credentials !== undefined && typeof removed.removed?.keyRef === 'string') {
       try {
         await credentials.unset(removed.removed.keyRef)
@@ -678,6 +716,75 @@ export function apply(ctx, rawConfig = {}) {
     }
   }
 
+  /**
+   * Send a few tiny requests through the ordinary account-pool path and report
+   * which accounts served them. This is the page's proof that DSH itself (not
+   * only the fallback router) spreads requests across the pooled keys: the
+   * requests carry no special purpose, so the same listener that serves a chat
+   * call plans them.
+   */
+  const runRotationTest = async (body) => {
+    const provider = requireAccountProvider(body?.provider)
+    const accounts = listAccounts(runtime.accounts, provider)
+    if (accounts.length < 2) throw new HttpError(409, 'need-two-accounts')
+    const config = currentConfig()
+    const models = await catalog.modelsFor(provider)
+    const requested = typeof body?.model === 'string' && body.model.length > 0 ? body.model : null
+    const model = requested ?? config.chain.find((entry) => entry.provider === provider)?.model ?? models[0]?.id
+    if (typeof model !== 'string' || model.length === 0) throw new HttpError(409, 'no-model')
+    const runs = Math.min(4, Math.max(1, Number.isFinite(Number(body?.runs)) ? Math.trunc(Number(body.runs)) : 2))
+    const before = health.snapshot().stats ?? {}
+    const results = []
+    for (let index = 0; index < runs; index += 1) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), config.probeTimeoutMs)
+      if (typeof timer.unref === 'function') timer.unref()
+      const startedAt = Date.now()
+      try {
+        const stream = llm.stream({
+          provider,
+          model,
+          messages: [{ role: 'user', content: [{ type: 'text', text: PROBE_PROMPT }] }],
+          maxTokens: 24,
+          sessionId: randomUUID(),
+          signal: controller.signal,
+        })
+        const outcome = await collectProbeStream(stream)
+        const failure = outcome.finish?.reason?.kind === 'error' ? outcome.finish.reason.failure : null
+        results.push({
+          ok: failure === null,
+          failure,
+          text: typeof outcome.text === 'string' ? outcome.text.slice(0, 120) : '',
+          latencyMs: Date.now() - startedAt,
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    const after = health.snapshot().stats ?? {}
+    const deltas = accounts.map((account) => {
+      const from = before[account.healthKey] ?? {}
+      const to = after[account.healthKey] ?? {}
+      return {
+        id: account.id,
+        label: account.label,
+        kind: account.kind,
+        requests: Math.max(0, Number(to.requests ?? 0) - Number(from.requests ?? 0)),
+        successes: Math.max(0, Number(to.successes ?? 0) - Number(from.successes ?? 0)),
+        failures: Math.max(0, Number(to.failures ?? 0) - Number(from.failures ?? 0)),
+      }
+    })
+    return {
+      ok: results.every((result) => result.ok === true),
+      provider,
+      model,
+      runs,
+      mode: config.accountMode,
+      results,
+      accounts: deltas,
+    }
+  }
+
   const statePayload = async () => {
     const config = currentConfig()
     const healthSnapshot = health.snapshot()
@@ -693,6 +800,7 @@ export function apply(ctx, rawConfig = {}) {
       config: {
         enabled: config.enabled,
         chain: config.chain,
+        accountMode: config.accountMode,
         fallbackCodes: config.fallbackCodes,
         maxAttempts: config.maxAttempts,
         cooldowns: config.cooldowns,
@@ -702,6 +810,7 @@ export function apply(ctx, rawConfig = {}) {
       overrides: runtime.overrides,
       defaults: {
         chain: DEFAULT_CONFIG.chain,
+        accountMode: DEFAULT_CONFIG.accountMode,
         fallbackCodes: DEFAULT_CONFIG.fallbackCodes,
         maxAttempts: DEFAULT_CONFIG.maxAttempts,
       },
@@ -781,6 +890,9 @@ export function apply(ctx, rawConfig = {}) {
     }
     if (path === `${ROUTE_PREFIX}/accounts/test`) {
       return { status: 200, payload: { ok: true, result: await testAccount(parseJsonBody(bodyText)), now: Date.now() } }
+    }
+    if (path === `${ROUTE_PREFIX}/accounts/rotation-test`) {
+      return { status: 200, payload: { ok: true, result: await runRotationTest(parseJsonBody(bodyText)), now: Date.now() } }
     }
     if (path === `${ROUTE_PREFIX}/models`) {
       const config = currentConfig()

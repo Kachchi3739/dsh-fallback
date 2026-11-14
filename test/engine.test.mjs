@@ -288,6 +288,59 @@ test('planAttempts caps pooled attempts', () => {
   assert.equal(attempts.length, 2)
 })
 
+test('planAttempts expands pooled accounts of a chain route', () => {
+  const chain = normalizeChain([
+    { provider: 'opencode-go', model: 'flash' },
+    { provider: 'backup', model: 'bm' },
+  ])
+  const accounts = [
+    { id: 'default', label: 'default', kind: 'default', healthKey: 'account:opencode-go:default' },
+    { id: 'a2', label: 'account 2', kind: 'added', healthKey: 'account:opencode-go:a2' },
+  ]
+  const attempts = planAttempts({
+    provider: 'primary',
+    model: 'pm',
+    chain,
+    accountsByProvider: { 'opencode-go': accounts },
+    health: createHealthStore({ now: () => 0 }),
+    maxAttempts: 8,
+  })
+  assert.deepEqual(
+    attempts.map((attempt) => `${attempt.provider}:${attempt.accountId ?? '-'}:${attempt.model}`),
+    ['primary:-:pm', 'opencode-go:default:flash', 'opencode-go:a2:flash', 'backup:-:bm'],
+  )
+})
+
+test('planAttempts skips a chain account inside its cooldown but keeps the next account', () => {
+  const chain = normalizeChain([{ provider: 'opencode-go', model: 'flash' }])
+  const accounts = [
+    { id: 'default', label: 'default', kind: 'default', healthKey: 'account:opencode-go:default' },
+    { id: 'a2', label: 'account 2', kind: 'added', healthKey: 'account:opencode-go:a2' },
+  ]
+  const health = createHealthStore({ now: () => 1000 })
+  health.markFailure('account:opencode-go:default', { code: 'QUOTA', message: 'q' }, 60_000)
+  const attempts = planAttempts({
+    provider: 'primary',
+    model: 'pm',
+    chain,
+    accountsByProvider: { 'opencode-go': accounts },
+    health,
+    maxAttempts: 8,
+    now: 1000,
+  })
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.accountId ?? attempt.provider),
+    ['primary', 'a2'],
+  )
+})
+
+test('resolveConfig normalizes the account mode', () => {
+  assert.equal(resolveConfig(DEFAULT_CONFIG, {}, {}).accountMode, 'rotate')
+  assert.equal(resolveConfig(DEFAULT_CONFIG, { accountMode: 'sticky' }, {}).accountMode, 'sticky')
+  assert.equal(resolveConfig(DEFAULT_CONFIG, { accountMode: 'nope' }, { accountMode: 'failover' }).accountMode, 'failover')
+  assert.equal(resolveConfig(DEFAULT_CONFIG, { accountMode: 'sticky' }, { accountMode: 'rotate' }).accountMode, 'rotate')
+})
+
 test('isFallbackFailure matches only configured codes', () => {
   assert.equal(isFallbackFailure({ code: 'QUOTA' }, ['QUOTA']), true)
   assert.equal(isFallbackFailure({ code: 'AUTH' }, ['QUOTA']), false)

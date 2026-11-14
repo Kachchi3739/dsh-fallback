@@ -112,7 +112,15 @@ window.__ModuleLoader__.load({
         summary: 'Answering router',
         accountsTitle: 'opencode-go accounts',
         accountsHint:
-          'Connect several API keys (accounts) to the same opencode-go router. If one account is exhausted, the plugin tries the next account and only then moves on down the fallback chain. The first account (default) uses the key configured in Settings → Models.',
+          'Connect several API keys (accounts) to the same opencode-go router. The plugin rotates them for every DSH request — even when router fallback is off — and only moves down the fallback chain after the accounts fail. The first (default) account uses the key configured in Settings → Models.',
+        accountModeLabel: 'Account usage',
+        accountModeRotate: 'Rotate per request',
+        accountModeSticky: 'Sticky per session',
+        accountModeFailover: 'Priority (failover)',
+        accountModeRotateHint: 'Every request starts with the next healthy account, so all keys share the load.',
+        accountModeStickyHint: 'Each session keeps one account for prompt-cache reuse; a new session takes the next account.',
+        accountModeFailoverHint: 'The first account is used until it fails; the next account takes over only then.',
+        accountModeApplies: 'Applies to every DSH request on this router, even with router fallback off.',
         accountDefault: 'default account',
         accountDefaultHint: 'uses the key from Settings → Models',
         accountAdded: 'added account',
@@ -133,11 +141,17 @@ window.__ModuleLoader__.load({
         accountTestOk: 'answered',
         accountTestFailed: 'failed',
         accountNeedsKey: 'Enter the account API key.',
+        accountRotationTest: 'Test rotation',
+        accountRotationTesting: 'Testing rotation…',
+        accountRotationResult: 'Account distribution',
+        accountRotationFailed: 'some test requests failed',
+        accountRequests: 'requests',
+        accountSuccesses: 'successes',
         accountSupportsHint:
-          'Accounts are rotated per request through the pi-ai header waterfall; keys are stored in the Harness credentials store, never in configuration or the state file.',
+          'Rotation uses the pi-ai header waterfall; keys stay in the Harness credentials store, never in configuration or the state file.',
         accountsUnavailable: 'The credentials service is unavailable in this profile, so accounts cannot be stored.',
         accountEmpty: 'Only the default account is in use.',
-        accountsChainHint: 'Requests for opencode-go try its accounts in this order, then continue down the fallback chain.',
+        accountsChainHint: 'These accounts serve this router everywhere in DSH, including as a fallback target.',
       },
       ko: {
         nav: '라우터 폴백',
@@ -207,7 +221,15 @@ window.__ModuleLoader__.load({
         summary: '응답 라우터',
         accountsTitle: 'opencode-go 계정',
         accountsHint:
-          '같은 opencode-go 라우터에 여러 API 키(계정)를 연결합니다. 한 계정이 한도를 소진하면 다음 계정을 시도하고, 계정이 모두 소진된 뒤에야 폴백 체인의 다음 라우터로 넘어갑니다. 첫 번째(기본) 계정은 설정 → 모델에 저장된 키를 사용합니다.',
+          '같은 opencode-go 라우터에 여러 API 키(계정)를 연결합니다. 라우터 폴백이 꺼져 있어도 플러그인이 모든 DSH 요청에서 이 계정들을 순환 사용하고, 계정들이 실패한 뒤에야 폴백 체인의 다음 라우터로 넘어갑니다. 첫 번째(기본) 계정은 설정 → 모델에 저장된 키를 사용합니다.',
+        accountModeLabel: '계정 사용 방식',
+        accountModeRotate: '요청마다 순환',
+        accountModeSticky: '세션마다 고정',
+        accountModeFailover: '우선순위 (장애 시 전환)',
+        accountModeRotateHint: '요청마다 다음 정상 계정으로 시작해 모든 키가 부하를 나눠 가집니다.',
+        accountModeStickyHint: '세션마다 한 계정을 유지해 프롬프트 캐시를 재사용하고, 새 세션은 다음 계정을 사용합니다.',
+        accountModeFailoverHint: '첫 계정을 우선 사용하고 실패하면 그때 다음 계정으로 넘어갑니다.',
+        accountModeApplies: '라우터 폴백이 꺼져 있어도 이 라우터의 모든 DSH 요청에 적용됩니다.',
         accountDefault: '기본 계정',
         accountDefaultHint: '설정 → 모델의 키 사용',
         accountAdded: '추가 계정',
@@ -228,10 +250,16 @@ window.__ModuleLoader__.load({
         accountTestOk: '응답',
         accountTestFailed: '실패',
         accountNeedsKey: '계정 API 키를 입력하세요.',
+        accountRotationTest: '로테이션 테스트',
+        accountRotationTesting: '로테이션 테스트 중…',
+        accountRotationResult: '계정 분배 결과',
+        accountRotationFailed: '일부 테스트 요청 실패',
+        accountRequests: '요청',
+        accountSuccesses: '성공',
         accountSupportsHint:
-          '계정은 요청마다 pi-ai 헤더 워터폴로 교체되며, 키는 Harness 자격 증명 저장소에만 보관됩니다(설정·상태 파일에는 남지 않음).',
+          '순환은 pi-ai 헤더 워터폴을 사용하며, 키는 Harness 자격 증명 저장소에만 보관됩니다(설정·상태 파일에는 남지 않음).',
         accountEmpty: '기본 계정만 사용 중입니다.',
-        accountsChainHint: 'opencode-go 요청은 이 순서로 계정을 시도한 뒤 폴백 체인으로 이어집니다.',
+        accountsChainHint: '이 계정들은 폴백 대상일 때를 포함해 DSH 전반에서 이 라우터를 담당합니다.',
       },
     }
 
@@ -305,7 +333,7 @@ window.__ModuleLoader__.load({
         fontSize: 11,
         fontWeight: 700,
       },
-      providerName: { flex: '1 1 130px', minWidth: 110, fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' },
+      providerName: { minWidth: 110, fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       providerId: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' },
       select: {
         flex: '1 1 auto',
@@ -473,6 +501,7 @@ window.__ModuleLoader__.load({
     const draftFromPayload = (payload) => ({
       enabled: payload.config.enabled !== false,
       chain: payload.config.chain.map((entry) => ({ provider: entry.provider, model: entry.model })),
+      accountMode: payload.config.accountMode ?? 'rotate',
       fallbackCodes: payload.config.fallbackCodes.slice(),
       maxAttempts: payload.config.maxAttempts,
       cooldownQuotaMin: Math.round((payload.config.cooldowns.QUOTA ?? 1800000) / 60000),
@@ -482,6 +511,7 @@ window.__ModuleLoader__.load({
     const overridesOf = (draft) => ({
       enabled: draft.enabled,
       chain: draft.chain.map((entry) => ({ provider: entry.provider, model: entry.model })),
+      accountMode: draft.accountMode,
       fallbackCodes: draft.fallbackCodes.slice(),
       maxAttempts: draft.maxAttempts,
       cooldowns: {
@@ -521,6 +551,7 @@ window.__ModuleLoader__.load({
       const [accountForm, setAccountForm] = useState({ label: '', key: '' })
       const [accountBusy, setAccountBusy] = useState(null)
       const [accountResult, setAccountResult] = useState(null)
+      const [rotationResult, setRotationResult] = useState(null)
       const dirtyRef = useRef(false)
 
       const locale = (key) => {
@@ -775,6 +806,37 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const changeAccountMode = async (mode) => {
+        setAccountBusy('mode')
+        setError(null)
+        try {
+          const next = await request('/config', { method: 'POST', body: JSON.stringify({ patch: { accountMode: mode } }) })
+          setPayload(next)
+          setDraft((current) => (current === null ? current : { ...current, accountMode: mode }))
+          setRotationResult(null)
+        } catch (modeError) {
+          setError(modeError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
+      const runRotationTest = async (provider) => {
+        setAccountBusy('rotation')
+        setRotationResult(null)
+        try {
+          const result = await request('/accounts/rotation-test', { method: 'POST', body: JSON.stringify({ provider }) })
+          setRotationResult({ provider, ...result.result })
+          const refreshed = await request('/accounts')
+          applyAccountsPayload(refreshed.accounts)
+          setError(null)
+        } catch (rotationError) {
+          setError(rotationError.message)
+        } finally {
+          setAccountBusy(null)
+        }
+      }
+
       const updateDraft = useCallback((mutate) => {
         setDraft((current) => {
           if (current === null) return current
@@ -833,6 +895,13 @@ window.__ModuleLoader__.load({
       const degraded = (provider) => provider.degraded !== null && provider.degraded !== undefined
       const healthyCount = providers.filter((provider) => !degraded(provider)).length
       const coolingCount = providers.length - healthyCount
+      const accountMode = payload?.accounts?.mode ?? payload?.config?.accountMode ?? 'rotate'
+      const accountModeHint =
+        accountMode === 'sticky'
+          ? locale('accountModeStickyHint')
+          : accountMode === 'failover'
+            ? locale('accountModeFailoverHint')
+            : locale('accountModeRotateHint')
 
       return h(
         'div',
@@ -921,6 +990,27 @@ window.__ModuleLoader__.load({
               { style: styles.card },
               h('h2', { style: styles.cardTitle }, locale('accountsTitle')),
               h('p', { style: styles.hint }, locale('accountsHint')),
+              (payload.accounts.providers ?? []).length > 0
+                ? h(
+                    'div',
+                    { style: styles.row },
+                    h('span', { style: { fontSize: 12, fontWeight: 600 } }, locale('accountModeLabel')),
+                    h(
+                      'select',
+                      {
+                        style: styles.select,
+                        value: accountMode,
+                        disabled: accountBusy !== null,
+                        onChange: (event) => changeAccountMode(event.target.value),
+                      },
+                      h('option', { value: 'rotate' }, locale('accountModeRotate')),
+                      h('option', { value: 'sticky' }, locale('accountModeSticky')),
+                      h('option', { value: 'failover' }, locale('accountModeFailover')),
+                    ),
+                    h('span', { style: styles.muted }, locale('accountModeApplies')),
+                  )
+                : null,
+              (payload.accounts.providers ?? []).length > 0 ? h('p', { style: styles.hint }, accountModeHint) : null,
               payload.accounts.credentialsAvailable === false
                 ? h('p', { style: styles.warning }, locale('accountsUnavailable'))
                 : null,
@@ -932,8 +1022,18 @@ window.__ModuleLoader__.load({
                   { key: entry.provider, style: { display: 'flex', flexDirection: 'column', gap: 6 } },
                   h(
                     'div',
-                    { style: styles.spread },
+                    { style: styles.row },
                     h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, `${entry.displayName} (${entry.provider})`),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        style: styles.smallButton,
+                        disabled: accountBusy !== null || rows.length < 2,
+                        onClick: () => runRotationTest(entry.provider),
+                      },
+                      accountBusy === 'rotation' ? locale('accountRotationTesting') : locale('accountRotationTest'),
+                    ),
                     h('span', { style: styles.muted }, locale('accountsChainHint')),
                   ),
                   rows.length === 1
@@ -944,6 +1044,10 @@ window.__ModuleLoader__.load({
                     const cooling = account.degraded !== null && account.degraded !== undefined
                     const addedIndex = addedRows.findIndex((row) => row.id === account.id)
                     const testing = accountBusy === `test:${account.id}`
+                    const usage =
+                      account.stats !== null && account.stats !== undefined && account.stats.requests > 0
+                        ? ` · ${locale('accountRequests')} ${account.stats.requests} · ${locale('accountSuccesses')} ${account.stats.successes}`
+                        : ''
                     return h(
                       'div',
                       { key: account.id, style: styles.chainRow },
@@ -962,7 +1066,7 @@ window.__ModuleLoader__.load({
                               isDefault
                                 ? locale('accountDefaultHint')
                                 : `${locale('accountAdded')} · ${account.keyPresent === false ? locale('accountKeyMissing') : locale('accountKeyPresent')}`
-                            }${cooling ? ` · ${locale('healthCooling')} (${account.degraded.code}, ${formatRemaining(account.degraded.remainingMs)})` : ''}`,
+                            }${cooling ? ` · ${locale('healthCooling')} (${account.degraded.code}, ${formatRemaining(account.degraded.remainingMs)})` : ''}${usage}`,
                           ),
                         ),
                         cooling ? h('span', { style: styles.badBadge }, locale('healthCooling')) : h('span', { style: styles.okBadge }, locale('healthReady')),
@@ -1033,6 +1137,25 @@ window.__ModuleLoader__.load({
                           accountResult.ok === true
                             ? `${locale('accountTestOk')}: ${accountResult.account?.label ?? locale('accountDefault')} (${accountResult.latencyMs} ms)`
                             : `${locale('accountTestFailed')}: ${accountResult.failure?.code ?? 'ERROR'} ${accountResult.failure?.message ?? ''}`
+                        }`,
+                      )
+                    : null,
+                  rotationResult !== null && rotationResult.provider === entry.provider
+                    ? h(
+                        'p',
+                        { style: rotationResult.ok === true ? styles.hint : styles.error, role: 'status' },
+                        `${locale('accountRotationResult')} (${rotationResult.runs}×) · ${rotationResult.accounts
+                          .map(
+                            (account) =>
+                              `${account.kind === 'default' ? locale('accountDefault') : account.label ?? account.id} ${locale('accountRequests')} ${account.requests} · ${locale('accountSuccesses')} ${account.successes}`,
+                          )
+                          .join(' · ')}${
+                          rotationResult.ok === true
+                            ? ''
+                            : ` · ${locale('accountRotationFailed')}: ${rotationResult.results
+                                .filter((result) => result.ok !== true)
+                                .map((result) => result.failure?.code ?? 'ERROR')
+                                .join(', ')}`
                         }`,
                       )
                     : null,

@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.0 — 2026-11-14
+
+### Added
+
+- **DSH-wide account pooling.** The `opencode-go` / `opencode` accounts now
+  serve every request on that route — ordinary chats, subagents and the route's
+  turn as a fallback target — and keep rotating when router fallback is turned
+  off. Previously an added account only took over after the default account
+  failed, and only while fallback was enabled.
+- **Account usage modes** in the panel: `rotate` (round-robin per request,
+  default), `sticky` (one account per session for prompt-cache reuse), and
+  `failover` (priority order). The mode is stored with the other overrides.
+- **Rotation test** button: sends two tiny requests through the ordinary request
+  path and reports the per-account request/success split, proving the pool
+  without switching the chat model.
+- Per-account request/success counters are shown in the accounts panel.
+- Pools now apply to account-capable routes inside the fallback chain, not only
+  to the selected route (`planAttempts` accepts per-provider account lists).
+
+### Changed
+
+- Rotation bookkeeping lives in `lib/rotation.mjs` and is covered by unit tests;
+  the state file gains only the `accountMode` override (no new secrets).
+- Tests grew from 64 to 84 (rotation, DSH-wide pool, sticky/failover, chain-route
+  pools and the rotation-test endpoint).
+
 ## 1.1.0 — 2026-11-14
 
 ### Added

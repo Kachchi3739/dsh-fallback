@@ -28,6 +28,7 @@ test('resolveStateDir prefers the profile dir, then DSH_HOME', () => {
 test('normalizeOverrides keeps only known, valid fields', () => {
   const normalized = normalizeOverrides({
     enabled: false,
+    accountMode: 'sticky',
     chain: [{ provider: 'a', model: 'm' }, { provider: 'a', model: 'm2' }, { model: 'x' }],
     fallbackCodes: ['QUOTA', 'NOPE', 42],
     maxAttempts: 99,
@@ -37,6 +38,7 @@ test('normalizeOverrides keeps only known, valid fields', () => {
     unknown: 'dropped',
   })
   assert.deepEqual(normalized.chain, [{ provider: 'a', model: 'm' }])
+  assert.equal(normalized.accountMode, 'sticky')
   assert.deepEqual(normalized.fallbackCodes, ['QUOTA'])
   assert.equal(normalized.maxAttempts, 8)
   assert.equal(normalized.probeTimeoutMs, 1000)
@@ -52,6 +54,11 @@ test('mergeOverrides deep-merges cooldowns and revalidates', () => {
   )
   assert.deepEqual(merged.chain, [{ provider: 'b', model: 'm2' }])
   assert.deepEqual(merged.cooldowns, { QUOTA: 1000, RATE_LIMIT: 250 })
+})
+
+test('an unknown account mode is dropped instead of overriding the default', () => {
+  assert.equal('accountMode' in normalizeOverrides({ accountMode: 'nope' }), false)
+  assert.equal(normalizeOverrides({ accountMode: 'failover' }).accountMode, 'failover')
 })
 
 test('save and load round-trip the state file', () => {

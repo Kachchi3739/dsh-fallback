@@ -21,13 +21,16 @@ your Harness profile.
   `deepseek-account`, `deepseek-official`, custom gateways, …) together with
   each route's own model catalog. Adding a router to the chain needs no key,
   endpoint, or model list.
-- **Several API accounts on one router** — connect multiple `opencode-go` (or
-  `opencode`) accounts to the same router. Each request rotates the account key
-  through the documented `llm-pi-ai/request-headers` waterfall; an exhausted
-  account is skipped with its own cooldown and the next account answers before
-  the chain moves on. Keys live in the Harness credentials store — never in
-  configuration or the state file. Accounts are tested, skipped, resumed and
-  reordered from the panel.
+- **Several API accounts on one router, across DSH** — connect multiple
+  `opencode-go` (or `opencode`) accounts to the same router. The plugin rotates
+  the account key through the documented `llm-pi-ai/request-headers` waterfall
+  for **every** DSH request on that route — including ordinary chats, subagents,
+  and the route's turn as a fallback target — even when router fallback is off.
+  Choose rotate-per-request (default), sticky-per-session, or priority/failover;
+  an exhausted account gets its own cooldown and falls through to the next
+  account before the chain moves on. Keys live in the Harness credentials store
+  — never in configuration or the state file. Accounts are tested, skipped,
+  resumed and reordered from the panel.
 - **Per-request attempt chain** — requests start at the router you selected in
   the composer, then continue down the chain. Order is editable from the panel.
 - **Cooldown after exhaustion** — a router that reported an exhausted quota is
@@ -94,15 +97,30 @@ In the **opencode-go accounts** section:
    *Settings → Models* (`OPENCODE_GO_API_KEY` in the profile).
 2. Paste another account's key and press **Add account**. The key is stored
    through the credentials service under a generated
-   `DSH_FALLBACK_OPENCODE_GO_*` reference; the account joins the rotation in
-   the order shown (use ↑/↓ to change it).
-3. **Test** sends one tiny request with that account's key and reports the
-   result. **Skip 30 min** takes an account out of rotation without deleting
-   it; **Resume** puts it back.
-4. Requests to `opencode-go` try its accounts in order, then continue down the
-   fallback chain. If every account is cooling down, the chain answers (and if
-   nothing is healthy, the first account is tried so its real failure is
-   shown).
+   `DSH_FALLBACK_OPENCODE_GO_*` reference; the account joins the pool in the
+   order shown (use ↑/↓ to change it).
+3. Choose **Account usage**:
+   - **Rotate per request** (default) — every DSH request starts on the next
+     healthy account, so all keys share the load.
+   - **Sticky per session** — each conversation keeps one account for prompt
+     cache reuse; a new conversation takes the next account.
+   - **Priority (failover)** — the first account is used until it fails.
+4. **Test** sends one tiny request with that account's key. **Test rotation**
+   sends two tiny requests through the ordinary request path and shows which
+   account served each one. **Skip 30 min** takes an account out of rotation
+   without deleting it; **Resume** puts it back.
+5. The pool serves this route everywhere in DSH: normal chats, subagents, and
+   the route's turn as a fallback target. Only after every healthy account has
+   failed does the chain continue. If every account is cooling down, the chain
+   answers (and if nothing is healthy, the first account is tried so its real
+   failure is shown).
+
+The account pool works independently of the **Enable router fallback** switch:
+turning fallback off disables the chain, not the account rotation. `maxAttempts`
+still caps the total attempts (accounts plus chain), so raise it when you pool
+more accounts than that. Rotate-per-request gives every key an equal share; if
+the provider caches prompts per key, sticky-per-session keeps cache hits while
+still spreading different conversations across accounts.
 
 Because rotation happens at the pi-ai header seam, it works for every model on
 the route — including `anthropic-messages` models (`x-api-key`) and
@@ -130,8 +148,9 @@ missing file simply falls back to the bundle defaults.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Enable router fallback | on | Off leaves every request on the selected router. |
+| Enable router fallback | on | Off disables the chain; pooled accounts still rotate. |
 | Fallback chain | empty | Ordered routers; first ready one answers. |
+| Account usage | rotate per request | How pooled keys are chosen: rotate, sticky per session, or priority/failover. |
 | Trigger codes | `QUOTA`, `ACCOUNT_QUOTA`, `RATE_LIMIT` | Failures that move the request to the next router. |
 | Max attempts per request | 3 | Hard cap including the selected router. |
 | Quota/balance skip | 30 min | Cooldown after `QUOTA`/`ACCOUNT_QUOTA`, unless the provider reports `retry-after`. |
@@ -147,9 +166,11 @@ attempt through the normal adapter path, and only re-dispatches
 *before* any content became visible. Everything else — session log, streaming,
 tool calls, turn errors — is the shipped behavior.
 
-Pooled accounts are an attempt dimension on the same route: the plan lists the
-route's accounts (default first, then added accounts), each with its own health
-key, followed by the chain. Each attempt's key is carried into
+Pooled accounts are an attempt dimension on the same route, applied to the
+selected route and to every chain route that supports accounts. Before each
+call the pool orders its healthy accounts — round-robin, sticky per session, or
+the configured priority — and each attempt carries its own health key, followed
+by the chain. Each attempt's key is carried into
 `llm-pi-ai/request-headers` through Node's async-local storage, because that
 waterfall receives only routing metadata. Writing the protocol's auth header
 there overrides the route's configured key for that request only (verified
@@ -188,6 +209,10 @@ node --test --test-isolation=none "test/*.test.mjs"
 
 - `lib/engine.mjs` — attempt planning, failure classification, cooldowns,
   reasoning-history sanitization, the buffering stream runner (pure, unit
+  tested).
+- `lib/accounts.mjs` — the pooled-account model, credential references and
+  validation.
+- `lib/rotation.mjs` — rotate/sticky/failover account ordering (pure, unit
   tested).
 - `lib/providers.mjs` — live provider/model discovery over the `llm` service.
 - `lib/probe.mjs` — the quota probe adapter and self-test request.
