@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1 — 2026-11-14
+
+### Fixed
+
+- The Router fallback page is now its own scroll container (`flex: 1 1 auto`,
+  `min-height: 0`, `overflow: auto`). The shell clips the panel area, so a page
+  taller than the window previously could not be scrolled with the mouse wheel;
+  the account pool, chain, trigger codes and event log below the fold are now
+  reachable.
+
 ## 1.2.0 — 2026-11-14
 
 ### Added

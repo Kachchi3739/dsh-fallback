@@ -1,6 +1,6 @@
 {
   "name": "dsh-fallback",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Transparent router fallback and pooled opencode-go API accounts for DeepSeek Harness: when the active router's quota is exhausted, the same request continues on the next connected router, and several keys of one router are rotated per request (DSH-wide, even without fallback). Works in dsh-desktop.",

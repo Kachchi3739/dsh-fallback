@@ -63,7 +63,7 @@ import {
 } from './lib/state.mjs'
 
 /** Must match `version` in package.json (asserted by the test suite). */
-export const PLUGIN_VERSION = '1.2.0'
+export const PLUGIN_VERSION = '1.2.1'
 
 /** Same-origin HTTP prefix consumed by `client.js`. */
 const ROUTE_PREFIX = '/dsh-fallback'
