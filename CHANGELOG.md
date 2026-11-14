@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1 — 2026-11-15
+
+### Changed
+
+- Public-release cleanup: the key-shaped literal in the redaction test is built at
+  runtime, so the repository contains no secret-shaped string, and the embedded
+  model → protocol snapshot is attributed in `THIRD_PARTY_NOTICES.md`
+  (`@earendil-works/pi-ai`, MIT).
+
 ## 1.3.0 — 2026-11-14
 
 ### Security

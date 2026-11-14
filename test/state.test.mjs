@@ -29,10 +29,12 @@ test('resolveStateDir prefers the profile dir, then DSH_HOME', () => {
 })
 
 test('redaction removes home paths, org ids, tokens and full session ids', () => {
-  const redacted = redactMessage('429 https://example.test/console/org_ABC123 sk-secretvalue1234567890')
+  // Built at runtime so a public checkout does not contain a key-shaped literal.
+  const token = `sk-${'x'.repeat(24)}`
+  const redacted = redactMessage(`429 https://example.test/console/org_ABC123 ${token}`)
   assert.equal(redacted.includes('https://'), false)
   assert.equal(redacted.includes('org_ABC123'), false)
-  assert.equal(redacted.includes('sk-secret'), false)
+  assert.equal(redacted.includes(token), false)
   const tag = redactSessionId('session-abc')
   assert.match(tag, /^session:[0-9a-f]{8}$/)
   assert.equal(redactSessionId(tag), tag)

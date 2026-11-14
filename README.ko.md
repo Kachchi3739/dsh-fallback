@@ -224,4 +224,5 @@ node --test --test-isolation=none "test/*.test.mjs"
 
 ## 라이선스
 
-MIT — [LICENSE](LICENSE) 참고.
+MIT — [LICENSE](LICENSE) 참고. 제3자 고지는
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.
